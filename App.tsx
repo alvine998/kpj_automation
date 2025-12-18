@@ -10,12 +10,14 @@ import Waiting from './src/screens/Waiting/Waiting';
 import Home from './src/screens/Home/Home';
 import DataTerkumpul from './src/screens/DataTerkumpul/DataTerkumpul';
 import Akun from './src/screens/Akun/Akun';
+import SippWebView from './src/screens/WebView/SippWebView';
 import {loadSession} from './src/utils/session';
 
 export type RootStackParamList = {
   Login: undefined;
   Waiting: {userId: string};
   MainTabs: undefined;
+  SippWebView: undefined;
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -116,6 +118,7 @@ export default function App() {
             initialParams={waitingInitialParams as any}
           />
           <Stack.Screen name="MainTabs" component={MainTabs} />
+          <Stack.Screen name="SippWebView" component={SippWebView} />
         </Stack.Navigator>
       </NavigationContainer>
     </SafeAreaProvider>

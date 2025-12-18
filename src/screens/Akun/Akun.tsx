@@ -1,13 +1,26 @@
-import React from 'react';
+import React, {useEffect, useState} from 'react';
 import {Alert, StyleSheet, Text, TouchableOpacity, View} from 'react-native';
 import normalize from 'react-native-normalize';
 import {useNavigation} from '@react-navigation/native';
 import type {NativeStackNavigationProp} from '@react-navigation/native-stack';
 import type {RootStackParamList} from '../../../App';
-import {clearSession} from '../../utils/session';
+import {clearSession, loadSession} from '../../utils/session';
 
 export default function Akun() {
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
+  const [email, setEmail] = useState<string | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      const session = await loadSession();
+      if (!mounted) return;
+      setEmail(session?.email ?? null);
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   const logout = () => {
     Alert.alert('Logout', 'Are you sure?', [
@@ -26,7 +39,7 @@ export default function Akun() {
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Akun</Text>
-      <Text style={styles.subtitle}>Manage your account.</Text>
+      {email ? <Text style={styles.email}>{email}</Text> : null}
 
       <TouchableOpacity style={styles.button} onPress={logout}>
         <Text style={styles.buttonText}>Logout</Text>
@@ -48,6 +61,13 @@ const styles = StyleSheet.create({
     color: '#111',
     marginBottom: normalize(6),
     textAlign: 'center',
+  },
+  email: {
+    fontSize: normalize(14),
+    color: '#111',
+    fontWeight: '600',
+    textAlign: 'center',
+    marginBottom: normalize(8),
   },
   subtitle: {
     fontSize: normalize(14),

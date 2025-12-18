@@ -1,10 +1,12 @@
-import React, {useMemo, useState} from 'react';
+import React, {useEffect, useMemo, useState} from 'react';
 import {
   ActivityIndicator,
   Alert,
   FlatList,
   KeyboardAvoidingView,
+  Modal,
   Platform,
+  Switch,
   StyleSheet,
   Text,
   TextInput,
@@ -12,18 +14,116 @@ import {
   View,
 } from 'react-native';
 import normalize from 'react-native-normalize';
+import {useNavigation} from '@react-navigation/native';
+import type {NativeStackNavigationProp} from '@react-navigation/native-stack';
+import type {RootStackParamList} from '../../../App';
+import {saveGeneratedKpj} from '../../utils/kpjStorage';
+import {loadSession} from '../../utils/session';
+import {
+  collection,
+  getDocs,
+  query,
+  serverTimestamp,
+  updateDoc,
+  doc,
+  where,
+} from 'firebase/firestore';
+import {db} from '../../utils/firebase';
 
 export default function Home() {
+  const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const [kpj11, setKpj11] = useState('');
   const [countText, setCountText] = useState('10');
   const [results, setResults] = useState<string[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
+
+  const [role, setRole] = useState<string | null>(null);
+  const [usersOpen, setUsersOpen] = useState(false);
+  const [usersLoading, setUsersLoading] = useState(false);
+  const [users, setUsers] = useState<
+    Array<{id: string; email?: string; role?: string; active?: boolean}>
+  >([]);
 
   const prefix7 = useMemo(() => kpj11.replace(/\D/g, '').slice(0, 7), [kpj11]);
 
   const sanitizeDigits = (s: string) => s.replace(/\D/g, '');
 
   const random4 = () => String(Math.floor(Math.random() * 10000)).padStart(4, '0');
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      const session = await loadSession();
+      if (!mounted) return;
+      setRole(session?.role ?? null);
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const fetchUsers = async () => {
+    setUsersLoading(true);
+    try {
+      // NOTE: Using `where(role == 'user')` + `orderBy(createdAt)` requires a Firestore composite index.
+      // To avoid manual index creation, we query by role only and sort locally.
+      const q = query(collection(db, 'users'), where('role', '==', 'user'));
+      const snap = await getDocs(q);
+      const mapped = snap.docs.map(d => {
+        const data = d.data() as {
+          email?: string;
+          role?: string;
+          active?: boolean;
+          createdAt?: any;
+        };
+        return {
+          id: d.id,
+          email: data.email,
+          role: data.role,
+          active: data.active,
+          createdAt: data.createdAt,
+        };
+      });
+
+      mapped.sort((a, b) => {
+        const aMs =
+          typeof a.createdAt?.toMillis === 'function' ? a.createdAt.toMillis() : 0;
+        const bMs =
+          typeof b.createdAt?.toMillis === 'function' ? b.createdAt.toMillis() : 0;
+        return bMs - aMs;
+      });
+
+      setUsers(
+        mapped.map(({createdAt, ...rest}) => rest),
+      );
+    } catch (e: any) {
+      console.error('fetchUsers error:', e);
+      Alert.alert('Error', e?.message ?? 'Failed to load users.');
+    } finally {
+      setUsersLoading(false);
+    }
+  };
+
+  const openUsers = async () => {
+    setUsersOpen(true);
+    await fetchUsers();
+  };
+
+  const toggleUserActive = async (userId: string, next: boolean) => {
+    // Optimistic UI
+    setUsers(prev => prev.map(u => (u.id === userId ? {...u, active: next} : u)));
+    try {
+      await updateDoc(doc(db, 'users', userId), {
+        active: next,
+        updatedAt: serverTimestamp(),
+      });
+    } catch (e: any) {
+      console.error('toggleUserActive error:', e);
+      Alert.alert('Error', e?.message ?? 'Failed to update user.');
+      // revert
+      setUsers(prev => prev.map(u => (u.id === userId ? {...u, active: !next} : u)));
+    }
+  };
 
   const generate = async () => {
     if (isGenerating) return;
@@ -76,8 +176,29 @@ export default function Home() {
   };
 
   const cariData = () => {
-    // TODO: define behavior (API? search Firestore? open new screen?)
-    Alert.alert('Cari Data', 'Tell me what source to search and what to show.');
+    if (!results.length) {
+      Alert.alert('No data', 'Please generate KPJ first.');
+      return;
+    }
+
+    const base = sanitizeDigits(kpj11);
+    if (base.length !== 11) {
+      Alert.alert('Invalid KPJ', 'KPJ number must be exactly 11 digits.');
+      return;
+    }
+
+    saveGeneratedKpj({
+      baseKpj11: base,
+      generated: results,
+      savedAt: Date.now(),
+    })
+      .then(() => {
+        navigation.navigate('SippWebView');
+      })
+      .catch(e => {
+        console.error('saveGeneratedKpj error:', e);
+        Alert.alert('Error', 'Failed to save KPJ locally.');
+      });
   };
 
   return (
@@ -135,6 +256,15 @@ export default function Home() {
           disabled={isGenerating}>
           <Text style={styles.secondaryButtonText}>Cari Data</Text>
         </TouchableOpacity>
+
+        {role === 'admin' ? (
+          <TouchableOpacity
+            style={[styles.adminButton, isGenerating && styles.buttonDisabled]}
+            onPress={openUsers}
+            disabled={isGenerating}>
+            <Text style={styles.adminButtonText}>List Users</Text>
+          </TouchableOpacity>
+        ) : null}
       </View>
 
       <View style={styles.resultsHeader}>
@@ -165,6 +295,63 @@ export default function Home() {
           </Text>
         }
       />
+
+      <Modal
+        visible={usersOpen}
+        animationType="slide"
+        onRequestClose={() => setUsersOpen(false)}>
+        <View style={styles.modalContainer}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Users</Text>
+            <TouchableOpacity onPress={() => setUsersOpen(false)}>
+              <Text style={styles.modalClose}>Close</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.modalActions}>
+            <TouchableOpacity
+              style={[styles.modalRefresh, usersLoading && styles.buttonDisabled]}
+              onPress={fetchUsers}
+              disabled={usersLoading}>
+              {usersLoading ? (
+                <ActivityIndicator color="#007AFF" />
+              ) : (
+                <Text style={styles.modalRefreshText}>Refresh</Text>
+              )}
+            </TouchableOpacity>
+          </View>
+
+          <FlatList
+            data={users}
+            keyExtractor={item => item.id}
+            contentContainerStyle={styles.usersListContent}
+            renderItem={({item}) => (
+              <View style={styles.userRow}>
+                <View style={styles.userInfo}>
+                  <Text style={styles.userEmail}>{item.email ?? '(no email)'}</Text>
+                  <Text style={styles.userMeta}>
+                    Role: {item.role ?? '-'} • ID: {item.id}
+                  </Text>
+                </View>
+                <View style={styles.userToggle}>
+                  <Text style={styles.userActiveLabel}>
+                    {item.active ? 'Active' : 'Inactive'}
+                  </Text>
+                  <Switch
+                    value={!!item.active}
+                    onValueChange={v => toggleUserActive(item.id, v)}
+                  />
+                </View>
+              </View>
+            )}
+            ListEmptyComponent={
+              <Text style={styles.emptyText}>
+                {usersLoading ? 'Loading...' : 'No users found.'}
+              </Text>
+            }
+          />
+        </View>
+      </Modal>
     </KeyboardAvoidingView>
   );
 }
@@ -248,6 +435,19 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontSize: normalize(15),
   },
+  adminButton: {
+    marginTop: normalize(12),
+    height: normalize(48),
+    borderRadius: normalize(12),
+    backgroundColor: '#111',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  adminButtonText: {
+    color: '#fff',
+    fontWeight: '800',
+    fontSize: normalize(15),
+  },
   resultsHeader: {
     marginTop: normalize(16),
     marginBottom: normalize(8),
@@ -291,6 +491,81 @@ const styles = StyleSheet.create({
     paddingVertical: normalize(18),
     fontSize: normalize(13),
     color: '#888',
+  },
+  modalContainer: {
+    flex: 1,
+    backgroundColor: '#fff',
+    paddingTop: normalize(12),
+  },
+  modalHeader: {
+    paddingHorizontal: normalize(16),
+    paddingVertical: normalize(12),
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    borderBottomWidth: 1,
+    borderBottomColor: '#eee',
+  },
+  modalTitle: {
+    fontSize: normalize(16),
+    fontWeight: '800',
+    color: '#111',
+  },
+  modalClose: {
+    fontSize: normalize(14),
+    fontWeight: '700',
+    color: '#007AFF',
+  },
+  modalActions: {
+    paddingHorizontal: normalize(16),
+    paddingVertical: normalize(10),
+  },
+  modalRefresh: {
+    height: normalize(42),
+    borderRadius: normalize(10),
+    borderWidth: 1,
+    borderColor: '#007AFF',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalRefreshText: {
+    color: '#007AFF',
+    fontWeight: '800',
+    fontSize: normalize(14),
+  },
+  usersListContent: {
+    paddingHorizontal: normalize(16),
+    paddingBottom: normalize(24),
+  },
+  userRow: {
+    flexDirection: 'row',
+    gap: normalize(10),
+    paddingVertical: normalize(12),
+    borderBottomWidth: 1,
+    borderBottomColor: '#f0f0f0',
+    alignItems: 'center',
+  },
+  userInfo: {
+    flex: 1,
+  },
+  userEmail: {
+    fontSize: normalize(14),
+    fontWeight: '800',
+    color: '#111',
+    marginBottom: normalize(4),
+  },
+  userMeta: {
+    fontSize: normalize(11),
+    color: '#666',
+  },
+  userToggle: {
+    alignItems: 'flex-end',
+  },
+  userActiveLabel: {
+    fontSize: normalize(12),
+    fontWeight: '700',
+    color: '#333',
+    marginBottom: normalize(4),
   },
 });
 
