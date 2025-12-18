@@ -1,4 +1,4 @@
-import React, {useState} from 'react';
+import React, { useState } from 'react';
 import {
   View,
   Text,
@@ -10,7 +10,7 @@ import {
   ActivityIndicator,
   Alert,
 } from 'react-native';
-import {useSafeAreaInsets} from 'react-native-safe-area-context';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import normalize from 'react-native-normalize';
 import {
   addDoc,
@@ -21,19 +21,19 @@ import {
   serverTimestamp,
   where,
 } from 'firebase/firestore';
-import {useNavigation} from '@react-navigation/native';
-import type {NativeStackNavigationProp} from '@react-navigation/native-stack';
-import type {RootStackParamList} from '../../../App';
-import {db} from '../../utils/firebase';
-import {hashPassword} from '../../utils/crypto';
-import {saveSession} from '../../utils/session';
+import { useNavigation } from '@react-navigation/native';
+import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import type { RootStackParamList } from '../../../App';
+import { db } from '../../utils/firebase';
+import { hashPassword } from '../../utils/crypto';
+import { saveSession } from '../../utils/session';
 
 interface LoginProps {
   onLogin?: (email: string, password: string) => void;
   onSignUp?: () => void;
 }
 
-const Login: React.FC<LoginProps> = ({onLogin, onSignUp}) => {
+const Login: React.FC<LoginProps> = ({ onLogin, onSignUp }) => {
   const navigation =
     useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const [email, setEmail] = useState('');
@@ -65,12 +65,12 @@ const Login: React.FC<LoginProps> = ({onLogin, onSignUp}) => {
         const snap = await getDocs(q);
 
         if (snap.empty) {
-          Alert.alert('Error', 'Invalid email or password');
+          Alert.alert('Error', 'Email atau password tidak valid');
           return;
         }
 
         const userDoc = snap.docs[0];
-        const data = userDoc.data() as {active?: boolean; role?: string};
+        const data = userDoc.data() as { active?: boolean; role?: string };
 
         if (data.active === true) {
           await saveSession({
@@ -81,7 +81,7 @@ const Login: React.FC<LoginProps> = ({onLogin, onSignUp}) => {
           });
           navigation.reset({
             index: 0,
-            routes: [{name: 'MainTabs'}],
+            routes: [{ name: 'MainTabs' }],
           });
           return;
         }
@@ -93,11 +93,11 @@ const Login: React.FC<LoginProps> = ({onLogin, onSignUp}) => {
           role: data.role,
           active: false,
         });
-        navigation.replace('Waiting', {userId: userDoc.id});
+        navigation.replace('Waiting', { userId: userDoc.id });
       }
     } catch (error) {
       console.error('Login error:', error);
-      Alert.alert('Error', 'Login failed. Please try again.');
+      Alert.alert('Error', 'Login gagal. Silahkan coba lagi.');
     } finally {
       setIsLoading(false);
     }
@@ -105,19 +105,19 @@ const Login: React.FC<LoginProps> = ({onLogin, onSignUp}) => {
 
   const handleSignUp = async () => {
     if (!email.trim() || !password.trim()) {
-      Alert.alert('Error', 'Please fill in all fields');
+      Alert.alert('Error', 'Silahkan isi semua field');
       return;
     }
 
     // Basic email validation
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email.trim())) {
-      Alert.alert('Error', 'Please enter a valid email address');
+      Alert.alert('Error', 'Silahkan masukkan email yang valid');
       return;
     }
 
     if (password.length < 6) {
-      Alert.alert('Error', 'Password must be at least 6 characters');
+      Alert.alert('Error', 'Password minimal 6 karakter');
       return;
     }
 
@@ -145,7 +145,7 @@ const Login: React.FC<LoginProps> = ({onLogin, onSignUp}) => {
       );
       const existsSnap = await getDocs(existsQ);
       if (!existsSnap.empty) {
-        Alert.alert('Error', 'Email already exists');
+        Alert.alert('Error', 'Email sudah ada');
         return;
       }
 
@@ -154,7 +154,7 @@ const Login: React.FC<LoginProps> = ({onLogin, onSignUp}) => {
         email: emailValue,
       });
 
-      Alert.alert('Success', 'Account created successfully!', [
+      Alert.alert('Success', 'Akun berhasil dibuat!', [
         {
           text: 'OK',
           onPress: async () => {
@@ -167,7 +167,7 @@ const Login: React.FC<LoginProps> = ({onLogin, onSignUp}) => {
               role: 'user',
               active: false,
             });
-            navigation.replace('Waiting', {userId: ref.id});
+            navigation.replace('Waiting', { userId: ref.id });
           },
         },
       ]);
@@ -198,8 +198,8 @@ const Login: React.FC<LoginProps> = ({onLogin, onSignUp}) => {
       >
         {/* Header */}
         <View style={styles.header}>
-          <Text style={styles.title}>Welcome Back</Text>
-          <Text style={styles.subtitle}>Sign in to continue</Text>
+          <Text style={styles.title}>Selamat Datang Kembali</Text>
+          <Text style={styles.subtitle}>Masuk untuk melanjutkan</Text>
         </View>
 
         {/* Form */}
@@ -209,7 +209,7 @@ const Login: React.FC<LoginProps> = ({onLogin, onSignUp}) => {
             <Text style={styles.label}>Email</Text>
             <TextInput
               style={styles.input}
-              placeholder="Enter your email"
+              placeholder="Masukkan email"
               placeholderTextColor="#999"
               value={email}
               onChangeText={setEmail}
@@ -226,7 +226,7 @@ const Login: React.FC<LoginProps> = ({onLogin, onSignUp}) => {
             <View style={styles.passwordContainer}>
               <TextInput
                 style={styles.passwordInput}
-                placeholder="Enter your password"
+                placeholder="Masukkan password"
                 placeholderTextColor="#999"
                 value={password}
                 onChangeText={setPassword}
@@ -241,16 +241,11 @@ const Login: React.FC<LoginProps> = ({onLogin, onSignUp}) => {
                 disabled={isLoading}
               >
                 <Text style={styles.eyeButtonText}>
-                  {showPassword ? 'Hide' : 'Show'}
+                  {showPassword ? 'Sembunyikan' : 'Lihat'}
                 </Text>
               </TouchableOpacity>
             </View>
           </View>
-
-          {/* Forgot Password */}
-          <TouchableOpacity style={styles.forgotPassword} disabled={isLoading}>
-            <Text style={styles.forgotPasswordText}>Forgot Password?</Text>
-          </TouchableOpacity>
 
           {/* Login Button */}
           <TouchableOpacity
@@ -265,7 +260,7 @@ const Login: React.FC<LoginProps> = ({onLogin, onSignUp}) => {
             {isLoading ? (
               <ActivityIndicator color="#fff" />
             ) : (
-              <Text style={styles.loginButtonText}>Sign In</Text>
+              <Text style={styles.loginButtonText}>Login</Text>
             )}
           </TouchableOpacity>
 
@@ -282,7 +277,7 @@ const Login: React.FC<LoginProps> = ({onLogin, onSignUp}) => {
             {isLoading ? (
               <ActivityIndicator color="#007AFF" />
             ) : (
-              <Text style={styles.signUpButtonText}>Sign Up</Text>
+              <Text style={styles.signUpButtonText}>Daftar</Text>
             )}
           </TouchableOpacity>
         </View>

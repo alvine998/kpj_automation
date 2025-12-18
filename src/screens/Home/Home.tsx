@@ -105,7 +105,7 @@ export default function Home() {
       setUsers(mapped.map(({createdAt: _createdAt, ...rest}) => rest));
     } catch (e: any) {
       console.error('fetchUsers error:', e);
-      Alert.alert('Error', e?.message ?? 'Failed to load users.');
+      Alert.alert('Error', e?.message ?? 'Gagal memuat daftar pengguna.');
     } finally {
       setUsersLoading(false);
     }
@@ -126,7 +126,7 @@ export default function Home() {
       });
     } catch (e: any) {
       console.error('toggleUserActive error:', e);
-      Alert.alert('Error', e?.message ?? 'Failed to update user.');
+      Alert.alert('Error', e?.message ?? 'Gagal memperbarui pengguna.');
       // revert
       setUsers(prev => prev.map(u => (u.id === userId ? {...u, active: !next} : u)));
     }
@@ -138,19 +138,19 @@ export default function Home() {
     const baseKpj = sanitizeKpj(kpj11);
     if (!isValidKpj(baseKpj)) {
       Alert.alert(
-        'Invalid KPJ',
-        'KPJ must be 11 characters and the last 4 characters must be digits.',
+        'KPJ tidak valid',
+        'KPJ harus 11 karakter dan 4 karakter terakhir harus angka.',
       );
       return;
     }
 
     const count = Number(sanitizeDigits(countText));
     if (!Number.isFinite(count) || count <= 0) {
-      Alert.alert('Invalid amount', 'Please enter a valid amount to generate.');
+      Alert.alert('Jumlah tidak valid', 'Masukkan jumlah yang benar untuk dibuat.');
       return;
     }
-    if (count > 1000) {
-      Alert.alert('Too many', 'Max 1000 numbers per generate.');
+    if (count > 5000) {
+      Alert.alert('Terlalu banyak', 'Maksimal 5000 nomor per proses.');
       return;
     }
 
@@ -176,8 +176,8 @@ export default function Home() {
 
       if (count > maxUnique) {
         Alert.alert(
-          'Note',
-          `Only 10,000 unique combinations are possible for the last 4 digits. Generated ${list.length}.`,
+          'Catatan',
+          `Kombinasi unik untuk 4 digit terakhir maksimal 10.000. Berhasil dibuat ${list.length}.`,
         );
       }
     } finally {
@@ -187,15 +187,15 @@ export default function Home() {
 
   const cariData = () => {
     if (!results.length) {
-      Alert.alert('No data', 'Please generate KPJ first.');
+      Alert.alert('Data kosong', 'Silakan generate KPJ terlebih dahulu.');
       return;
     }
 
     const base = sanitizeKpj(kpj11);
     if (!isValidKpj(base)) {
       Alert.alert(
-        'Invalid KPJ',
-        'KPJ must be 11 characters and the last 4 characters must be digits.',
+        'KPJ tidak valid',
+        'KPJ harus 11 karakter dan 4 karakter terakhir harus angka.',
       );
       return;
     }
@@ -210,7 +210,7 @@ export default function Home() {
       })
       .catch(e => {
         console.error('saveGeneratedKpj error:', e);
-        Alert.alert('Error', 'Failed to save KPJ locally.');
+        Alert.alert('Error', 'Gagal menyimpan KPJ di perangkat.');
       });
   };
 
@@ -225,8 +225,8 @@ export default function Home() {
     const next = sanitizeKpj(editValue);
     if (!isValidKpj(next)) {
       Alert.alert(
-        'Invalid KPJ',
-        'KPJ must be 11 characters and the last 4 characters must be digits.',
+        'KPJ tidak valid',
+        'KPJ harus 11 karakter dan 4 karakter terakhir harus angka.',
       );
       return;
     }
@@ -254,35 +254,35 @@ export default function Home() {
       style={styles.container}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <View style={styles.header}>
-        <Text style={styles.title}>KPJ Generator</Text>
+        <Text style={styles.title}>Generator KPJ</Text>
         <Text style={styles.subtitle}>
-          Keep first 7 digits, randomize last 4 digits.
+          Pertahankan 7 karakter pertama, acak 4 digit terakhir.
         </Text>
       </View>
 
       <View style={styles.form}>
-        <Text style={styles.label}>KPJ Number (11 digits)</Text>
+        <Text style={styles.label}>Nomor KPJ (11 karakter)</Text>
         <TextInput
           style={styles.input}
           value={kpj11}
           onChangeText={t => setKpj11(sanitizeKpj(t))}
           autoCapitalize="characters"
-          placeholder="Example: 05K40081234"
+          placeholder="Contoh: 05K40081234"
           placeholderTextColor="#999"
           maxLength={11}
           editable={!isGenerating}
         />
-        <Text style={styles.helperText}>Prefix (first 7): {prefix7 || '-'}</Text>
+        <Text style={styles.helperText}>Awalan (7 pertama): {prefix7 || '-'}</Text>
 
         <Text style={[styles.label, {marginTop: normalize(14)}]}>
-          How many to generate
+          Jumlah yang dibuat
         </Text>
         <TextInput
           style={styles.input}
           value={countText}
           onChangeText={t => setCountText(sanitizeDigits(t).slice(0, 5))}
           keyboardType="number-pad"
-          placeholder="Example: 10"
+          placeholder="Contoh: 10"
           placeholderTextColor="#999"
           editable={!isGenerating}
         />
@@ -302,7 +302,7 @@ export default function Home() {
           style={[styles.refreshButton, isGenerating && styles.buttonDisabled]}
           onPress={generate}
           disabled={isGenerating}>
-          <Text style={styles.refreshButtonText}>Refresh</Text>
+          <Text style={styles.refreshButtonText}>Ulangi</Text>
         </TouchableOpacity>
 
         <TouchableOpacity
@@ -317,18 +317,18 @@ export default function Home() {
             style={[styles.adminButton, isGenerating && styles.buttonDisabled]}
             onPress={openUsers}
             disabled={isGenerating}>
-            <Text style={styles.adminButtonText}>List Users</Text>
+            <Text style={styles.adminButtonText}>Daftar Pengguna</Text>
           </TouchableOpacity>
         ) : null}
       </View>
 
       <View style={styles.resultsHeader}>
         <Text style={styles.resultsTitle}>
-          Results {results.length ? `(${results.length})` : ''}
+          Hasil {results.length ? `(${results.length})` : ''}
         </Text>
         {results.length ? (
           <TouchableOpacity onPress={() => setResults([])}>
-            <Text style={styles.clearText}>Clear</Text>
+            <Text style={styles.clearText}>Hapus</Text>
           </TouchableOpacity>
         ) : null}
       </View>
@@ -343,13 +343,13 @@ export default function Home() {
             <Text style={styles.rowIndex}>{index + 1}.</Text>
             <View style={styles.rowRight}>
               <Text style={styles.rowValue}>{item}</Text>
-              <Text style={styles.rowHint}>Tap to edit</Text>
+              <Text style={styles.rowHint}>Ketuk untuk edit</Text>
             </View>
           </TouchableOpacity>
         )}
         ListEmptyComponent={
           <Text style={styles.emptyText}>
-            Enter KPJ + amount, then tap Generate.
+            Isi KPJ dan jumlah, lalu ketuk Generate.
           </Text>
         }
       />
@@ -362,24 +362,24 @@ export default function Home() {
         <View style={styles.modalBackdrop}>
           <View style={styles.modalCard}>
             <Text style={styles.modalTitleText}>Edit KPJ</Text>
-            <Text style={styles.modalSubtitleText}>11 chars, last 4 digits</Text>
+            <Text style={styles.modalSubtitleText}>11 karakter, 4 terakhir angka</Text>
             <TextInput
               style={styles.modalInput}
               value={editValue}
               onChangeText={t => setEditValue(sanitizeKpj(t))}
               autoCapitalize="characters"
               maxLength={11}
-              placeholder="Input No KPJ"
+              placeholder="Masukkan No. KPJ"
               placeholderTextColor="#999"
             />
             <View style={styles.modalButtons}>
               <TouchableOpacity
                 style={styles.modalCancel}
                 onPress={() => setEditOpen(false)}>
-                <Text style={styles.modalCancelText}>Cancel</Text>
+                <Text style={styles.modalCancelText}>Batal</Text>
               </TouchableOpacity>
               <TouchableOpacity style={styles.modalSave} onPress={saveEdit}>
-                <Text style={styles.modalSaveText}>Save</Text>
+                <Text style={styles.modalSaveText}>Simpan</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -392,9 +392,9 @@ export default function Home() {
         onRequestClose={() => setUsersOpen(false)}>
         <View style={styles.modalContainer}>
           <View style={styles.modalHeader}>
-            <Text style={styles.modalTitle}>Users</Text>
+            <Text style={styles.modalTitle}>Pengguna</Text>
             <TouchableOpacity onPress={() => setUsersOpen(false)}>
-              <Text style={styles.modalClose}>Close</Text>
+              <Text style={styles.modalClose}>Tutup</Text>
             </TouchableOpacity>
           </View>
 
@@ -406,7 +406,7 @@ export default function Home() {
               {usersLoading ? (
                 <ActivityIndicator color="#007AFF" />
               ) : (
-                <Text style={styles.modalRefreshText}>Refresh</Text>
+                <Text style={styles.modalRefreshText}>Muat ulang</Text>
               )}
             </TouchableOpacity>
           </View>
@@ -420,12 +420,12 @@ export default function Home() {
                 <View style={styles.userInfo}>
                   <Text style={styles.userEmail}>{item.email ?? '(no email)'}</Text>
                   <Text style={styles.userMeta}>
-                    Role: {item.role ?? '-'} • ID: {item.id}
+                    Peran: {item.role ?? '-'} • ID: {item.id}
                   </Text>
                 </View>
                 <View style={styles.userToggle}>
                   <Text style={styles.userActiveLabel}>
-                    {item.active ? 'Active' : 'Inactive'}
+                    {item.active ? 'Aktif' : 'Nonaktif'}
                   </Text>
                   <Switch
                     value={!!item.active}
@@ -436,7 +436,7 @@ export default function Home() {
             )}
             ListEmptyComponent={
               <Text style={styles.emptyText}>
-                {usersLoading ? 'Loading...' : 'No users found.'}
+                {usersLoading ? 'Memuat...' : 'Tidak ada pengguna.'}
               </Text>
             }
           />

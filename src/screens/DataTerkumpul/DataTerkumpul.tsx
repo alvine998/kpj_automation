@@ -350,8 +350,7 @@ export default function DataTerkumpul() {
         )}
         ListEmptyComponent={
           <Text style={styles.emptyText}>
-            No data yet. Run WebView process until it saves to Firestore
-            `foundUser`.
+            Data belum tersedia.
           </Text>
         }
       />

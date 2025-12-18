@@ -2,8 +2,10 @@ import React, {useCallback, useEffect, useMemo, useState} from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Platform,
   StyleSheet,
   Text,
+  ToastAndroid,
   TouchableOpacity,
   View,
 } from 'react-native';
@@ -13,6 +15,7 @@ import {doc, getDoc} from 'firebase/firestore';
 import {db} from '../../utils/firebase';
 import type {RootStackParamList} from '../../../App';
 import {clearSession, saveSession} from '../../utils/session';
+import Clipboard from '@react-native-clipboard/clipboard';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Waiting'>;
 
@@ -24,6 +27,15 @@ export default function Waiting({navigation, route}: Props) {
   const [role, setRole] = useState<string | null>(null);
 
   const userRef = useMemo(() => doc(db, 'users', userId), [userId]);
+
+  const copyUid = useCallback(() => {
+    const uid = String(userId ?? '').trim();
+    if (!uid) return;
+    Clipboard.setString(uid);
+    const msg = 'UID copied';
+    if (Platform.OS === 'android') ToastAndroid.show(msg, ToastAndroid.SHORT);
+    else Alert.alert('Copied', msg);
+  }, [userId]);
 
   const checkStatus = useCallback(async () => {
     setIsLoading(true);
@@ -77,13 +89,24 @@ export default function Waiting({navigation, route}: Props) {
   return (
     <View style={styles.container}>
       <View style={styles.card}>
-        <Text style={styles.title}>Waiting for approval</Text>
+        <Text style={styles.title}>Menunggu persetujuan</Text>
         <Text style={styles.subtitle}>
-          Your account needs to be activated by an admin.
+          Akun Anda perlu diaktifkan oleh admin.
         </Text>
 
         {email ? <Text style={styles.email}>{email}</Text> : null}
         {role ? <Text style={styles.role}>Role: {role}</Text> : null}
+
+        <TouchableOpacity
+          onPress={copyUid}
+          accessibilityRole="button"
+          disabled={!userId}
+          style={styles.uidBlock}>
+          <Text style={styles.uidLabel}>UID (tap to copy)</Text>
+          <Text style={styles.uidValue} selectable>
+            {userId}
+          </Text>
+        </TouchableOpacity>
 
         <View style={styles.statusRow}>
           <View
@@ -94,9 +117,9 @@ export default function Waiting({navigation, route}: Props) {
           />
           <Text style={styles.statusText}>
             {isActive === true
-              ? 'Active'
+              ? 'Aktif'
               : isActive === false
-                ? 'Pending activation'
+                ? 'Menunggu aktivasi'
                 : 'Checking...'}
           </Text>
         </View>
@@ -119,7 +142,7 @@ export default function Waiting({navigation, route}: Props) {
             navigation.replace('Login');
           }}
           disabled={isLoading}>
-          <Text style={styles.secondaryButtonText}>Back to Login</Text>
+          <Text style={styles.secondaryButtonText}>Kembali ke Login</Text>
         </TouchableOpacity>
       </View>
     </View>
@@ -162,6 +185,25 @@ const styles = StyleSheet.create({
     color: '#666',
     marginTop: normalize(-10),
     marginBottom: normalize(16),
+  },
+  uidBlock: {
+    borderWidth: 1,
+    borderColor: '#eee',
+    borderRadius: normalize(12),
+    padding: normalize(12),
+    backgroundColor: '#fafafa',
+    marginBottom: normalize(14),
+  },
+  uidLabel: {
+    fontSize: normalize(12),
+    color: '#666',
+    fontWeight: '700',
+    marginBottom: normalize(6),
+  },
+  uidValue: {
+    fontSize: normalize(18),
+    color: '#111',
+    fontWeight: '800',
   },
   statusRow: {
     flexDirection: 'row',
