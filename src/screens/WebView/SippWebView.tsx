@@ -102,12 +102,12 @@ export default function SippWebView() {
                 clearInterval(closeInterval);
                 post(3, false, {reason:'Close (×) button not found', attempts: closeAttempts});
               }
-            }, 250);
+            }, 1000);
           } else if (attempts >= maxAttempts) {
             clearInterval(okInterval);
             post(2, false, {reason:'OK button not found', attempts: attempts});
           }
-        }, 250);
+        }, 1000);
       })();
       true;
     `);
@@ -155,7 +155,7 @@ export default function SippWebView() {
             clearInterval(interval);
             post(4, false, {reason:'Tambah TK link not found', attempts: attempts});
           }
-        }, 250);
+        }, 1000);
       })();
       true;
     `);
@@ -284,8 +284,8 @@ export default function SippWebView() {
             }
 
             clearInterval(sInterval);
-          }, 250);
-        }, 250);
+          }, 1000);
+        }, 1000);
       })();
       true;
     `);
