@@ -36,6 +36,9 @@ export default function Home() {
   const [countText, setCountText] = useState('10');
   const [results, setResults] = useState<string[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  const [editIndex, setEditIndex] = useState<number | null>(null);
+  const [editValue, setEditValue] = useState('');
 
   const [role, setRole] = useState<string | null>(null);
   const [usersOpen, setUsersOpen] = useState(false);
@@ -44,7 +47,13 @@ export default function Home() {
     Array<{id: string; email?: string; role?: string; active?: boolean}>
   >([]);
 
-  const prefix7 = useMemo(() => kpj11.replace(/\D/g, '').slice(0, 7), [kpj11]);
+  // KPJ rules:
+  // - total length: 11 characters
+  // - last 4 characters: digits
+  const sanitizeKpj = (s: string) => s.replace(/\s+/g, '').slice(0, 11);
+  const isValidKpj = (s: string) => s.length === 11 && /^\d{4}$/.test(s.slice(-4));
+
+  const prefix7 = useMemo(() => sanitizeKpj(kpj11).slice(0, 7), [kpj11]);
 
   const sanitizeDigits = (s: string) => s.replace(/\D/g, '');
 
@@ -93,9 +102,7 @@ export default function Home() {
         return bMs - aMs;
       });
 
-      setUsers(
-        mapped.map(({createdAt, ...rest}) => rest),
-      );
+      setUsers(mapped.map(({createdAt: _createdAt, ...rest}) => rest));
     } catch (e: any) {
       console.error('fetchUsers error:', e);
       Alert.alert('Error', e?.message ?? 'Failed to load users.');
@@ -128,9 +135,12 @@ export default function Home() {
   const generate = async () => {
     if (isGenerating) return;
 
-    const digits = sanitizeDigits(kpj11);
-    if (digits.length !== 11) {
-      Alert.alert('Invalid KPJ', 'KPJ number must be exactly 11 digits.');
+    const baseKpj = sanitizeKpj(kpj11);
+    if (!isValidKpj(baseKpj)) {
+      Alert.alert(
+        'Invalid KPJ',
+        'KPJ must be 11 characters and the last 4 characters must be digits.',
+      );
       return;
     }
 
@@ -149,7 +159,7 @@ export default function Home() {
     await new Promise<void>(resolve => setTimeout(resolve, 0));
 
     try {
-      const prefix = digits.slice(0, 7);
+      const prefix = baseKpj.slice(0, 7);
       const set = new Set<string>();
       // Generate unique results as much as possible (max unique space = 10,000)
       const maxUnique = 10000;
@@ -181,9 +191,12 @@ export default function Home() {
       return;
     }
 
-    const base = sanitizeDigits(kpj11);
-    if (base.length !== 11) {
-      Alert.alert('Invalid KPJ', 'KPJ number must be exactly 11 digits.');
+    const base = sanitizeKpj(kpj11);
+    if (!isValidKpj(base)) {
+      Alert.alert(
+        'Invalid KPJ',
+        'KPJ must be 11 characters and the last 4 characters must be digits.',
+      );
       return;
     }
 
@@ -199,6 +212,41 @@ export default function Home() {
         console.error('saveGeneratedKpj error:', e);
         Alert.alert('Error', 'Failed to save KPJ locally.');
       });
+  };
+
+  const openEdit = (index: number) => {
+    setEditIndex(index);
+    setEditValue(results[index] ?? '');
+    setEditOpen(true);
+  };
+
+  const saveEdit = async () => {
+    if (editIndex === null) return;
+    const next = sanitizeKpj(editValue);
+    if (!isValidKpj(next)) {
+      Alert.alert(
+        'Invalid KPJ',
+        'KPJ must be 11 characters and the last 4 characters must be digits.',
+      );
+      return;
+    }
+
+    const updated = [...results];
+    if (!updated[editIndex]) return;
+    updated[editIndex] = next;
+    setResults(updated);
+
+    // Persist for WebView automation (local storage)
+    const base = sanitizeKpj(kpj11);
+    await saveGeneratedKpj({
+      baseKpj11: base,
+      generated: updated,
+      savedAt: Date.now(),
+    });
+
+    setEditOpen(false);
+    setEditIndex(null);
+    setEditValue('');
   };
 
   return (
@@ -217,9 +265,9 @@ export default function Home() {
         <TextInput
           style={styles.input}
           value={kpj11}
-          onChangeText={t => setKpj11(sanitizeDigits(t).slice(0, 11))}
-          keyboardType="number-pad"
-          placeholder="Example: 12345678901"
+          onChangeText={t => setKpj11(sanitizeKpj(t))}
+          autoCapitalize="characters"
+          placeholder="Example: 05K40081234"
           placeholderTextColor="#999"
           maxLength={11}
           editable={!isGenerating}
@@ -248,6 +296,13 @@ export default function Home() {
           ) : (
             <Text style={styles.buttonText}>Generate</Text>
           )}
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.refreshButton, isGenerating && styles.buttonDisabled]}
+          onPress={generate}
+          disabled={isGenerating}>
+          <Text style={styles.refreshButtonText}>Refresh</Text>
         </TouchableOpacity>
 
         <TouchableOpacity
@@ -284,10 +339,13 @@ export default function Home() {
         keyboardShouldPersistTaps="handled"
         contentContainerStyle={styles.listContent}
         renderItem={({item, index}) => (
-          <View style={styles.row}>
+          <TouchableOpacity style={styles.row} onPress={() => openEdit(index)}>
             <Text style={styles.rowIndex}>{index + 1}.</Text>
-            <Text style={styles.rowValue}>{item}</Text>
-          </View>
+            <View style={styles.rowRight}>
+              <Text style={styles.rowValue}>{item}</Text>
+              <Text style={styles.rowHint}>Tap to edit</Text>
+            </View>
+          </TouchableOpacity>
         )}
         ListEmptyComponent={
           <Text style={styles.emptyText}>
@@ -295,6 +353,38 @@ export default function Home() {
           </Text>
         }
       />
+
+      <Modal
+        visible={editOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setEditOpen(false)}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitleText}>Edit KPJ</Text>
+            <Text style={styles.modalSubtitleText}>11 chars, last 4 digits</Text>
+            <TextInput
+              style={styles.modalInput}
+              value={editValue}
+              onChangeText={t => setEditValue(sanitizeKpj(t))}
+              autoCapitalize="characters"
+              maxLength={11}
+              placeholder="Input No KPJ"
+              placeholderTextColor="#999"
+            />
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                style={styles.modalCancel}
+                onPress={() => setEditOpen(false)}>
+                <Text style={styles.modalCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.modalSave} onPress={saveEdit}>
+                <Text style={styles.modalSaveText}>Save</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       <Modal
         visible={usersOpen}
@@ -420,6 +510,21 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontSize: normalize(15),
   },
+  refreshButton: {
+    marginTop: normalize(12),
+    height: normalize(48),
+    borderRadius: normalize(12),
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+    borderColor: '#111',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  refreshButtonText: {
+    color: '#111',
+    fontWeight: '800',
+    fontSize: normalize(15),
+  },
   secondaryButton: {
     marginTop: normalize(12),
     height: normalize(48),
@@ -487,10 +592,84 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     letterSpacing: 0.3,
   },
+  rowRight: {
+    flex: 1,
+  },
+  rowHint: {
+    marginTop: normalize(2),
+    fontSize: normalize(11),
+    color: '#888',
+  },
   emptyText: {
     paddingVertical: normalize(18),
     fontSize: normalize(13),
     color: '#888',
+  },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    justifyContent: 'center',
+    paddingHorizontal: normalize(20),
+  },
+  modalCard: {
+    backgroundColor: '#fff',
+    borderRadius: normalize(14),
+    padding: normalize(14),
+  },
+  modalTitleText: {
+    fontSize: normalize(16),
+    fontWeight: '800',
+    color: '#111',
+    marginBottom: normalize(4),
+    textAlign: 'center',
+  },
+  modalSubtitleText: {
+    fontSize: normalize(12),
+    color: '#666',
+    textAlign: 'center',
+    marginBottom: normalize(12),
+  },
+  modalInput: {
+    height: normalize(48),
+    borderWidth: 1,
+    borderColor: '#e0e0e0',
+    borderRadius: normalize(12),
+    paddingHorizontal: normalize(14),
+    fontSize: normalize(16),
+    color: '#111',
+    backgroundColor: '#f9f9f9',
+  },
+  modalButtons: {
+    flexDirection: 'row',
+    gap: normalize(10),
+    marginTop: normalize(12),
+  },
+  modalCancel: {
+    flex: 1,
+    height: normalize(44),
+    borderRadius: normalize(12),
+    borderWidth: 1,
+    borderColor: '#999',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalCancelText: {
+    color: '#333',
+    fontWeight: '800',
+    fontSize: normalize(14),
+  },
+  modalSave: {
+    flex: 1,
+    height: normalize(44),
+    borderRadius: normalize(12),
+    backgroundColor: '#007AFF',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalSaveText: {
+    color: '#fff',
+    fontWeight: '800',
+    fontSize: normalize(14),
   },
   modalContainer: {
     flex: 1,
