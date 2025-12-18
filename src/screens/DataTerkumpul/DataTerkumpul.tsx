@@ -1,11 +1,27 @@
-import React, {useCallback, useEffect, useMemo, useState} from 'react';
-import {FlatList, RefreshControl, StyleSheet, Text, View} from 'react-native';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  Alert,
+  FlatList,
+  Platform,
+  RefreshControl,
+  StyleSheet,
+  Text,
+  ToastAndroid,
+  TouchableOpacity,
+  View,
+} from 'react-native';
 import normalize from 'react-native-normalize';
-import {collection, getDocs, query, where} from 'firebase/firestore';
-import {db} from '../../utils/firebase';
-import {loadSession} from '../../utils/session';
+import { collection, deleteDoc, doc, getDocs, query, where } from 'firebase/firestore';
+import { useNavigation } from '@react-navigation/native';
+import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import type { RootStackParamList } from '../../../App';
+import { db } from '../../utils/firebase';
+import { loadSession } from '../../utils/session';
+import Clipboard from '@react-native-clipboard/clipboard';
+import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
 
 export default function DataTerkumpul() {
+  const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const [loading, setLoading] = useState(false);
   const [userId, setUserId] = useState<string | null>(null);
   const [items, setItems] = useState<
@@ -22,6 +38,9 @@ export default function DataTerkumpul() {
       email?: string;
       createdAt?: any;
       name?: string;
+      kelurahan?: string;
+      kabupaten?: string;
+      validasiLasik?: string | null;
     }>
   >([]);
 
@@ -41,7 +60,7 @@ export default function DataTerkumpul() {
         where('userId', '==', userId),
       );
       const snap = await getDocs(q);
-      const mapped = snap.docs.map(d => ({id: d.id, ...(d.data() as any)}));
+      const mapped = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
       // sort locally by createdAt desc (avoid composite index requirements)
       mapped.sort((a, b) => {
         const aMs =
@@ -71,11 +90,112 @@ export default function DataTerkumpul() {
     [items],
   );
 
+  const formatForClipboard = useCallback(
+    (item: (typeof items)[number]) => {
+      // Plain text that pastes well into chat/notes.
+      const lines: string[] = [];
+      if (item.kpj) lines.push(`KPJ: ${item.kpj}`);
+      if (item.name) lines.push(`Nama: ${item.name}`);
+      if (item.nik) lines.push(`NIK: ${item.nik}`);
+      if (item.birthdate) lines.push(`Tanggal Lahir: ${item.birthdate}`);
+      if (item.gender) lines.push(`Jenis Kelamin: ${item.gender}`);
+      if (item.marritalStatus)
+        lines.push(`Status Perkawinan: ${item.marritalStatus}`);
+      if (item.phone) lines.push(`No. HP: ${item.phone}`);
+      if (item.email) lines.push(`Email: ${item.email}`);
+      if (item.kabupaten) lines.push(`Kabupaten: ${item.kabupaten}`);
+      if (item.kelurahan) lines.push(`Kelurahan: ${item.kelurahan}`);
+      if (item.address) lines.push(`Alamat: ${item.address}`);
+      if (item.validasiLasik === null) lines.push('Validasi LASIK: Belum Cek Lasik');
+      if (item.validasiLasik === 'false') lines.push('Validasi LASIK: Tidak');
+      if (item.validasiLasik === 'true') lines.push('Validasi LASIK: Ya');
+      // Always include something so clipboard isn't empty.
+      if (!lines.length) lines.push('-');
+      return lines.join('\n');
+    },
+    [items],
+  );
+
+  const copyCard = useCallback(
+    async (item: (typeof items)[number]) => {
+      try {
+        const text = formatForClipboard(item);
+        Clipboard.setString(text);
+        if (Platform.OS === 'android') {
+          ToastAndroid.show('Copied', ToastAndroid.SHORT);
+        } else {
+          Alert.alert('Copied', 'Card data copied to clipboard.');
+        }
+      } catch (e: any) {
+        Alert.alert('Copy failed', e?.message ?? String(e));
+      }
+    },
+    [formatForClipboard],
+  );
+
+  const confirmDelete = useCallback(
+    (item: (typeof items)[number]) => {
+      Alert.alert(
+        'Hapus data?',
+        `KPJ: ${item.kpj ?? '-'}\nNIK: ${item.nik ?? '-'}`,
+        [
+          { text: 'Batal', style: 'cancel' },
+          {
+            text: 'Hapus',
+            style: 'destructive',
+            onPress: async () => {
+              try {
+                await deleteDoc(doc(db, 'foundUser', item.id));
+                setItems(prev => prev.filter(x => x.id !== item.id));
+                if (Platform.OS === 'android') {
+                  ToastAndroid.show('Deleted', ToastAndroid.SHORT);
+                } else {
+                  Alert.alert('Deleted', 'Data removed.');
+                }
+              } catch (e: any) {
+                Alert.alert('Delete failed', e?.message ?? String(e));
+              }
+            },
+          },
+        ],
+      );
+    },
+    [setItems],
+  );
+
+  const copyValue = useCallback((label: string, raw: any) => {
+    const value = String(raw ?? '').trim();
+    if (!value || value === '-') return;
+    Clipboard.setString(value);
+    const msg = `${label} copied`;
+    if (Platform.OS === 'android') {
+      ToastAndroid.show(msg, ToastAndroid.SHORT);
+    } else {
+      Alert.alert('Copied', msg);
+    }
+  }, []);
+
+  const ValueText = ({ label, value }: { label: string; value: any }) => (
+    <TouchableOpacity
+      onPress={() => copyValue(label, value)}
+      accessibilityRole="button"
+      disabled={
+        value == null ||
+        String(value).trim() === '' ||
+        String(value).trim() === '-'
+      }
+    >
+      <Text style={styles.value}>{value ?? '-'}</Text>
+    </TouchableOpacity>
+  );
+
   return (
     <View style={styles.container}>
       <View style={styles.header}>
         <Text style={styles.title}>Data Terkumpul</Text>
-        <Text style={styles.subtitle}>Total: {total} • Found: {foundKpjCount}</Text>
+        <Text style={styles.subtitle}>
+          Total: {total} • Ditemukan: {foundKpjCount}
+        </Text>
         <Text style={styles.userId} numberOfLines={1}>
           {userId ? `User: ${userId}` : 'User: -'}
         </Text>
@@ -88,51 +208,144 @@ export default function DataTerkumpul() {
           <RefreshControl refreshing={loading} onRefresh={refresh} />
         }
         contentContainerStyle={styles.listContent}
-        renderItem={({item, index}) => (
-          <View style={styles.card}>
+        renderItem={({ item, index }) => (
+          <View
+            style={[
+              styles.card,
+              item.validasiLasik === 'false' && styles.cardBad,
+              item.validasiLasik === 'true' &&
+                styles.cardGood,
+            ]}
+          >
             <View style={styles.cardTop}>
               <View style={styles.badge}>
                 <Text style={styles.badgeText}>#{index + 1}</Text>
               </View>
               <View style={styles.cardTopRight}>
-                <Text style={styles.kpj}>{item.kpj ?? '-'}</Text>
-                {item.name ? <Text style={styles.name}>{item.name}</Text> : null}
+                <TouchableOpacity
+                  onPress={() => copyValue('KPJ', item.kpj)}
+                  accessibilityRole="button"
+                  disabled={!item.kpj}
+                >
+                  <Text style={styles.kpj}>{item.kpj ?? '-'}</Text>
+                </TouchableOpacity>
+                {item.name ? (
+                  <TouchableOpacity
+                    onPress={() => copyValue('Nama', item.name)}
+                    accessibilityRole="button"
+                  >
+                    <Text style={styles.name}>{item.name}</Text>
+                  </TouchableOpacity>
+                ) : null}
+              </View>
+              <View style={styles.cardActions}>
+                <TouchableOpacity
+                  style={styles.trashBtn}
+                  onPress={() => confirmDelete(item)}
+                  accessibilityRole="button"
+                >
+                  <Icon name="trash-can-outline" size={normalize(18)} color="#C62828" />
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.copyBtn}
+                  onPress={() => copyCard(item)}
+                  accessibilityRole="button"
+                >
+                  <Text style={styles.copyBtnText}>Copy</Text>
+                </TouchableOpacity>
               </View>
             </View>
 
             <View style={styles.grid}>
               <View style={styles.gridRow}>
                 <Text style={styles.label}>NIK</Text>
-                <Text style={styles.value}>{item.nik ?? '-'}</Text>
+                <ValueText label="NIK" value={item.nik ?? '-'} />
               </View>
               <View style={styles.gridRow}>
-                <Text style={styles.label}>Birthdate</Text>
-                <Text style={styles.value}>{item.birthdate ?? '-'}</Text>
+                <Text style={styles.label}>Tanggal Lahir</Text>
+                <ValueText
+                  label="Tanggal Lahir"
+                  value={item.birthdate ?? '-'}
+                />
               </View>
               <View style={styles.gridRow}>
-                <Text style={styles.label}>Gender</Text>
-                <Text style={styles.value}>{item.gender ?? '-'}</Text>
+                <Text style={styles.label}>Jenis Kelamin</Text>
+                <ValueText label="Jenis Kelamin" value={item.gender ?? '-'} />
               </View>
               <View style={styles.gridRow}>
-                <Text style={styles.label}>Marital</Text>
-                <Text style={styles.value}>{item.marritalStatus ?? '-'}</Text>
+                <Text style={styles.label}>Status Perkawinan</Text>
+                <ValueText
+                  label="Status Perkawinan"
+                  value={item.marritalStatus ?? '-'}
+                />
               </View>
               <View style={styles.gridRow}>
-                <Text style={styles.label}>Phone</Text>
-                <Text style={styles.value}>{item.phone ?? '-'}</Text>
+                <Text style={styles.label}>No. HP</Text>
+                <ValueText label="No. HP" value={item.phone ?? '-'} />
               </View>
               <View style={styles.gridRow}>
                 <Text style={styles.label}>Email</Text>
-                <Text style={styles.value}>{item.email ?? '-'}</Text>
+                <ValueText label="Email" value={item.email ?? '-'} />
+              </View>
+              <View style={styles.gridRow}>
+                <Text style={styles.label}>Kabupaten</Text>
+                <ValueText label="Kabupaten" value={item.kabupaten ?? '-'} />
+              </View>
+              <View style={styles.gridRow}>
+                <Text style={styles.label}>Kelurahan</Text>
+                <ValueText label="Kelurahan" value={item.kelurahan ?? '-'} />
               </View>
             </View>
 
             {item.address ? (
               <View style={styles.addressBlock}>
-                <Text style={styles.addressLabel}>Address</Text>
-                <Text style={styles.addressValue}>{item.address}</Text>
+                <Text style={styles.addressLabel}>Alamat</Text>
+                <TouchableOpacity
+                  onPress={() => copyValue('Alamat', item.address)}
+                  accessibilityRole="button"
+                >
+                  <Text style={styles.addressValue}>{item.address}</Text>
+                </TouchableOpacity>
               </View>
             ) : null}
+            <View style={styles.validLasikBlock}>
+              {(() => {
+                const lasik =
+                  item.validasiLasik === 'true'
+                    ? true
+                    : item.validasiLasik === 'false'
+                      ? false
+                      : null;
+
+                const text =
+                  lasik === null
+                    ? 'Belum Cek Lasik'
+                    : lasik
+                      ? 'Validasi Berhasil'
+                      : 'Validasi Gagal';
+
+                const iconName =
+                  lasik === null ? null : lasik ? 'check-circle' : 'close-circle';
+                const iconColor = lasik === true ? '#1E7D3A' : '#C62828';
+
+                return (
+                  <View style={styles.validLasikRow}>
+                    <Text style={styles.validLasikLabel}>Validasi LASIK</Text>
+                    <View style={styles.validLasikRight}>
+                      <Text style={styles.validLasikValue}>{text}</Text>
+                      {iconName ? (
+                        <Icon
+                          name={iconName}
+                          size={normalize(18)}
+                          color={iconColor}
+                          style={styles.validLasikIcon}
+                        />
+                      ) : null}
+                    </View>
+                  </View>
+                );
+              })()}
+            </View>
           </View>
         )}
         ListEmptyComponent={
@@ -142,6 +355,14 @@ export default function DataTerkumpul() {
           </Text>
         }
       />
+
+      <TouchableOpacity
+        style={styles.fab}
+        onPress={() => navigation.navigate('LasikWebView')}
+        accessibilityRole="button"
+      >
+        <Text style={styles.fabText}>Cek Lasik</Text>
+      </TouchableOpacity>
     </View>
   );
 }
@@ -164,14 +385,14 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   subtitle: {
-    fontSize: normalize(13),
+    fontSize: normalize(16),
     color: '#444',
     textAlign: 'center',
     fontWeight: '600',
   },
   userId: {
     marginTop: normalize(6),
-    fontSize: normalize(11),
+    fontSize: normalize(18),
     color: '#777',
     textAlign: 'center',
   },
@@ -186,6 +407,14 @@ const styles = StyleSheet.create({
     marginBottom: normalize(12),
     borderWidth: 1,
     borderColor: '#eef0f4',
+  },
+  cardBad: {
+    backgroundColor: '#FFE8E8',
+    borderColor: '#FFD0D0',
+  },
+  cardGood: {
+    backgroundColor: '#E9F8EF',
+    borderColor: '#CFF0DA',
   },
   cardTop: {
     flexDirection: 'row',
@@ -209,6 +438,35 @@ const styles = StyleSheet.create({
   cardTopRight: {
     flex: 1,
   },
+  copyBtn: {
+    paddingHorizontal: normalize(12),
+    paddingVertical: normalize(8),
+    borderRadius: normalize(10),
+    backgroundColor: '#111',
+    marginLeft: normalize(10),
+  },
+  cardActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginLeft: normalize(10),
+  },
+  trashBtn: {
+    width: normalize(34),
+    height: normalize(34),
+    borderRadius: normalize(12),
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#FFD0D0',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: normalize(8),
+  },
+  copyBtnText: {
+    color: '#fff',
+    fontWeight: '800',
+    fontSize: normalize(12),
+    letterSpacing: 0.2,
+  },
   kpj: {
     fontSize: normalize(16),
     fontWeight: '900',
@@ -229,14 +487,14 @@ const styles = StyleSheet.create({
     gap: normalize(10),
   },
   label: {
-    fontSize: normalize(12),
+    fontSize: normalize(16),
     color: '#666',
     fontWeight: '700',
   },
   value: {
     flex: 1,
     textAlign: 'right',
-    fontSize: normalize(12),
+    fontSize: normalize(16),
     color: '#111',
     fontWeight: '700',
   },
@@ -247,13 +505,13 @@ const styles = StyleSheet.create({
     borderTopColor: '#f0f0f0',
   },
   addressLabel: {
-    fontSize: normalize(12),
+    fontSize: normalize(16),
     color: '#666',
     fontWeight: '800',
     marginBottom: normalize(4),
   },
   addressValue: {
-    fontSize: normalize(12),
+    fontSize: normalize(16),
     color: '#111',
     fontWeight: '600',
     lineHeight: normalize(16),
@@ -263,5 +521,57 @@ const styles = StyleSheet.create({
     fontSize: normalize(13),
     color: '#888',
     textAlign: 'center',
+  },
+  fab: {
+    position: 'absolute',
+    right: normalize(18),
+    bottom: normalize(18),
+    paddingHorizontal: normalize(18),
+    paddingVertical: normalize(12),
+    borderRadius: normalize(18),
+    backgroundColor: '#007AFF',
+    shadowColor: '#000',
+    shadowOpacity: 0.18,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 6,
+  },
+  fabText: {
+    color: '#fff',
+    fontWeight: '900',
+    fontSize: normalize(14),
+    letterSpacing: 0.2,
+  },
+  validLasikBlock: {
+    marginTop: normalize(10),
+    paddingTop: normalize(10),
+    borderTopWidth: 1,
+    borderTopColor: '#f0f0f0',
+  },
+  validLasikRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: normalize(10),
+  },
+  validLasikRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: normalize(8),
+  },
+  validLasikLabel: {
+    fontSize: normalize(16),
+    color: '#666',
+    fontWeight: '800',
+    marginBottom: normalize(4),
+  },
+  validLasikValue: {
+    fontSize: normalize(16),
+    color: '#111',
+    fontWeight: '600',
+    lineHeight: normalize(16),
+  },
+  validLasikIcon: {
+    marginLeft: normalize(6),
   },
 });

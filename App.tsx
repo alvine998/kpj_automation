@@ -11,6 +11,7 @@ import Home from './src/screens/Home/Home';
 import DataTerkumpul from './src/screens/DataTerkumpul/DataTerkumpul';
 import Akun from './src/screens/Akun/Akun';
 import SippWebView from './src/screens/WebView/SippWebView';
+import LasikWebView from './src/screens/WebView/LasikWebView';
 import {loadSession} from './src/utils/session';
 
 export type RootStackParamList = {
@@ -18,6 +19,7 @@ export type RootStackParamList = {
   Waiting: {userId: string};
   MainTabs: undefined;
   SippWebView: undefined;
+  LasikWebView: undefined;
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -119,6 +121,7 @@ export default function App() {
           />
           <Stack.Screen name="MainTabs" component={MainTabs} />
           <Stack.Screen name="SippWebView" component={SippWebView} />
+          <Stack.Screen name="LasikWebView" component={LasikWebView} />
         </Stack.Navigator>
       </NavigationContainer>
     </SafeAreaProvider>

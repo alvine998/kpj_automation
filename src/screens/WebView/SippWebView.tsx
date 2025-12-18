@@ -19,12 +19,21 @@ import type {NativeStackNavigationProp} from '@react-navigation/native-stack';
 import type {RootStackParamList} from '../../../App';
 import {loadGeneratedKpj} from '../../utils/kpjStorage';
 import {loadSession} from '../../utils/session';
-import {addDoc, collection, doc, serverTimestamp, updateDoc} from 'firebase/firestore';
+import {
+  addDoc,
+  collection,
+  deleteDoc,
+  doc,
+  serverTimestamp,
+  updateDoc,
+} from 'firebase/firestore';
 import {db} from '../../utils/firebase';
 
 export default function SippWebView() {
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const webRef = useRef<WebView>(null);
+  const SIPP_FORM_URL =
+    'https://sipp.bpjsketenagakerjaan.go.id/tenaga-kerja/baru/form-tambah-tk-individu';
   const [listOpen, setListOpen] = useState(false);
   const [kpjList, setKpjList] = useState<string[]>([]);
   const [currentUrl, setCurrentUrl] = useState<string>(
@@ -32,6 +41,9 @@ export default function SippWebView() {
   );
   const [debugOpen, setDebugOpen] = useState(true);
   const [debugLogs, setDebugLogs] = useState<string[]>([]);
+  // Only run automation after user explicitly presses Process.
+  const [processArmed, setProcessArmed] = useState(false);
+  const processArmedRef = useRef(false);
   const [pendingStep, setPendingStep] = useState<0 | 2 | 4 | 5 | 9 | 10 | 11>(0);
   const pendingStepRef = useRef<0 | 2 | 4 | 5 | 9 | 10 | 11>(0);
   const lastStep2UrlRef = useRef<string | null>(null);
@@ -45,6 +57,7 @@ export default function SippWebView() {
   const [foundCount, setFoundCount] = useState(0);
   const [notFoundCount, setNotFoundCount] = useState(0);
   const [userId, setUserId] = useState<string | null>(null);
+  const [role, setRole] = useState<string | null>(null);
   const foundKpjRef = useRef<string | null>(null);
   const foundUserDocIdRef = useRef<string | null>(null);
   const foundNikRef = useRef<string | null>(null);
@@ -75,6 +88,11 @@ export default function SippWebView() {
     (async () => {
       const s = await loadSession();
       setUserId(s?.userId ?? null);
+      setRole(s?.role ?? null);
+      // Hide debug by default for non-admin users
+      if (s?.role !== 'admin') {
+        setDebugOpen(false);
+      }
     })();
   }, []);
 
@@ -83,6 +101,73 @@ export default function SippWebView() {
       const next = [`${new Date().toLocaleTimeString()}  ${line}`, ...prev];
       return next.slice(0, 80);
     });
+  };
+
+  const setArmed = (v: boolean) => {
+    processArmedRef.current = v;
+    setProcessArmed(v);
+  };
+
+  const normalizeUrl = (url: string) => url.replace(/\/+$/, '');
+  const isSippUrl = (url: string) =>
+    normalizeUrl(url).startsWith('https://sipp.bpjsketenagakerjaan.go.id');
+  const isOnSippFormUrl = (url: string) =>
+    normalizeUrl(url).startsWith(normalizeUrl(SIPP_FORM_URL));
+
+  const injectAutoRedirectAfterLogin = () => {
+    // Heuristic DOM check: if we look logged-in, jump to the TK individu form.
+    webRef.current?.injectJavaScript(`
+      (function () {
+        function post(ok, extra) {
+          try {
+            window.ReactNativeWebView.postMessage(JSON.stringify(Object.assign({type:'autoRedirect', ok:ok}, extra || {})));
+          } catch (e) {}
+        }
+
+        try {
+          var href = (location && location.href) ? String(location.href) : '';
+          var path = (location && location.pathname) ? String(location.pathname) : '';
+
+          // Don't interfere if we are already on target.
+          if (href.indexOf(${JSON.stringify(SIPP_FORM_URL)}) !== -1) {
+            post(true, {phase:'already_on_target', url: href});
+            return true;
+          }
+
+          // If we are on a login-ish page, do nothing.
+          var looksLikeLoginUrl =
+            path.toLowerCase().indexOf('login') !== -1 ||
+            href.toLowerCase().indexOf('login') !== -1 ||
+            href.toLowerCase().indexOf('auth') !== -1;
+
+          if (looksLikeLoginUrl) {
+            post(true, {phase:'login_page', url: href});
+            return true;
+          }
+
+          // DOM heuristic: logged-in pages usually have a Logout/Keluar action and no password field.
+          var hasPassword = !!document.querySelector('input[type="password"]');
+          var links = Array.prototype.slice.call(document.querySelectorAll('a,button'));
+          var hasLogout =
+            !!document.querySelector('a[href*="logout"], a[href*="keluar"]') ||
+            links.some(function(el){
+              var t = ((el.textContent || '') + '').trim().toLowerCase();
+              return t === 'logout' || t === 'keluar' || t.indexOf('logout') !== -1;
+            });
+
+          // If we see logout (and not on login form), assume authenticated.
+          if (hasLogout && !hasPassword) {
+            location.href = ${JSON.stringify(SIPP_FORM_URL)};
+            post(true, {phase:'redirect', url:${JSON.stringify(SIPP_FORM_URL)}});
+          } else {
+            post(true, {phase:'no_action', url: href, hasLogout: hasLogout, hasPassword: hasPassword});
+          }
+        } catch (e) {
+          post(false, {phase:'error', reason:String(e)});
+        }
+      })();
+      true;
+    `);
   };
 
   const injectStep2And3 = () => {
@@ -379,6 +464,7 @@ export default function SippWebView() {
             npwp: firstVal(['#npwp','input[name="npwp"]']),
             email: firstVal(['#email','input[name="email"]']),
             name: firstVal(['#nama_lengkap','input[name="nama_lengkap"]']),
+            validasiLasik: ""
           };
           return payload;
         }
@@ -405,7 +491,7 @@ export default function SippWebView() {
   };
 
   const injectStep10NavigateBack = () => {
-    const target = 'https://sipp.bpjsketenagakerjaan.go.id/tenaga-kerja/baru/form-tambah-tk-individu#';
+    const target = `${SIPP_FORM_URL}#`;
     webRef.current?.injectJavaScript(`
       (function () {
         try {
@@ -486,7 +572,7 @@ export default function SippWebView() {
 
             clearInterval(interval);
 
-            // Wait for result h2.mb-2 b
+            // Wait for result h2.mb-2 b + optional Kelurahan/Kabupaten in a <p> with 2 <b> tags
             var rAttempts = 0;
             var rMax = 60;
             var rInt = setInterval(function(){
@@ -494,8 +580,21 @@ export default function SippWebView() {
               var b = document.querySelector('h2.mb-2 b');
               var name = b ? (b.textContent || '').trim() : '';
               if (name) {
+                // Try parse kelurahan/kabupaten from the paragraph
+                var p = Array.prototype.slice.call(document.querySelectorAll('p'))
+                  .find(function(x){
+                    var t = (x.textContent || '').toLowerCase();
+                    return t.indexOf('anda telah terdaftar') !== -1 && t.indexOf('kelurahan') !== -1;
+                  }) || null;
+                var kelurahan = '';
+                var kabupaten = '';
+                if (p) {
+                  var bs = p.querySelectorAll('b');
+                  if (bs && bs.length >= 1) kelurahan = (bs[0].textContent || '').trim();
+                  if (bs && bs.length >= 2) kabupaten = (bs[1].textContent || '').trim();
+                }
                 clearInterval(rInt);
-                post(10, true, {phase:'result', nik: nik, name: name});
+                post(10, true, {phase:'result', nik: nik, name: name, kelurahan: kelurahan, kabupaten: kabupaten});
               } else if (rAttempts >= rMax) {
                 clearInterval(rInt);
                 post(10, false, {phase:'result', reason:'Name result not found', nik: nik});
@@ -512,100 +611,94 @@ export default function SippWebView() {
   };
 
   const onPressProcess = () => {
-    // Process steps:
-    // 1) Click "Edit" link (onclick="view('...')")
-    // 2) Click SweetAlert2 OK button: button.swal2-confirm.swal2-styled
-    // 3) Click modal close button: button.close[data-dismiss="modal"]
-    webRef.current?.injectJavaScript(`
-      (function () {
-        function post(step, ok, extra) {
-          try {
-            window.ReactNativeWebView.postMessage(JSON.stringify(Object.assign({type:'process', step:step, ok:ok}, extra || {})));
-          } catch (e) {}
-        }
-
-        function clickEdit() {
-          var links = Array.prototype.slice.call(document.querySelectorAll('a'));
-          var target = links.find(function(a){
-            var txt = (a.textContent || '').trim().toLowerCase();
-            var oc = (a.getAttribute('onclick') || '');
-            return txt === 'edit' && /view\\('\\s*[^']+\\s*'\\)/.test(oc);
-          });
-          if (!target) {
-            target = links.find(function(a){
-              var oc = (a.getAttribute('onclick') || '');
-              return /view\\('\\s*[^']+\\s*'\\)/.test(oc);
-            });
-          }
-          if (!target) return {ok:false, reason:'Edit link not found'};
-
-          var oc = (target.getAttribute('onclick') || '');
-          var m = oc.match(/view\\('\\s*([^']+)\\s*'\\)/);
-          var id = m && m[1] ? m[1] : null;
-
-          if (id && typeof window.view === 'function') {
-            window.view(id);
-          } else if (typeof target.onclick === 'function') {
-            target.onclick();
-          } else {
-            target.click();
-          }
-          return {ok:true, id:id};
-        }
-
-        try {
-          var r = clickEdit();
-          if (!r.ok) {
-            post(1, false, {reason: r.reason});
-            return true;
-          }
-          post(1, true, {id: r.id});
-        } catch (e) {
-          post(1, false, {reason: String(e)});
-        }
-      })();
-      true;
-    `);
-
-    pushLog('Process pressed');
+    pushLog('Process pressed (start from step 5)');
     // reset counters for a fresh run
     setFoundCount(0);
     setNotFoundCount(0);
+
+    if (!kpjList.length) {
+      Alert.alert('KPJ list empty', 'Go to Beranda → Generate → Cari Data');
+      pendingStepRef.current = 0;
+      setPendingStep(0);
+      setArmed(false);
+      return;
+    }
+
+    // Always start from step 5 on the TK individu form.
+    setArmed(true);
+    pendingStepRef.current = 5;
+    setPendingStep(5);
+    kpjIndexRef.current = 0;
+    setKpjIndex(0);
+    lastStep5UrlRef.current = null;
+    lastStep2UrlRef.current = null;
+    lastStep4UrlRef.current = null;
+    lastStep9UrlRef.current = null;
+    lastStep10UrlRef.current = null;
+    lastStep11UrlRef.current = null;
+
+    if (!isOnSippFormUrl(currentUrl)) {
+      // Navigate to the correct form first; step 5 will run on loadEnd.
+      webRef.current?.injectJavaScript(`
+        (function () {
+          try { window.location.href = ${JSON.stringify(SIPP_FORM_URL)}; } catch (e) {}
+        })();
+        true;
+      `);
+      pushLog(`Navigate to form: ${SIPP_FORM_URL}`);
+      return;
+    }
+
+    // Already on the form: run immediately.
+    injectSteps5to8ForKpj(kpjList[0]);
   };
 
-  const normalizeUrl = (url: string) => url.replace(/\/+$/, '');
   const isRootUrl =
     normalizeUrl(currentUrl) === 'https://sipp.bpjsketenagakerjaan.go.id';
 
   return (
     <View style={styles.container}>
-      <View style={styles.actions}>
-        <TouchableOpacity
-          style={[styles.actionBtn, isRootUrl && styles.actionBtnDisabled]}
-          onPress={onPressProcess}
-          disabled={isRootUrl}>
-          <Text style={styles.actionText}>Process</Text>
-        </TouchableOpacity>
-        <View style={styles.actionsRight}>
+      <View style={styles.topBar}>
+        <View style={styles.topBarLeft}>
+          <Text style={styles.topBarTitle} numberOfLines={1}>
+            SIPP
+          </Text>
+          <Text style={styles.topBarSubtitle} numberOfLines={1}>
+            {normalizeUrl(currentUrl)}
+          </Text>
+        </View>
+
+        <View style={styles.topBarRight}>
           <TouchableOpacity
-            style={styles.actionBtnOutline}
-            onPress={openKpjList}>
-            <Text style={styles.actionTextOutline}>List KPJ</Text>
+            style={[styles.processBtn, isRootUrl && styles.processBtnDisabled]}
+            onPress={onPressProcess}
+            disabled={isRootUrl}>
+            <Text style={styles.processBtnText}>Process</Text>
           </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.debugBtn}
-            onPress={() => setDebugOpen(v => !v)}>
-            <Text style={styles.debugText}>{debugOpen ? 'Hide' : 'Debug'}</Text>
+
+          <TouchableOpacity style={styles.iconBtn} onPress={openKpjList}>
+            <Text style={styles.iconBtnText}>KPJ</Text>
           </TouchableOpacity>
+
+          {role === 'admin' ? (
+            <TouchableOpacity
+              style={styles.iconBtn}
+              onPress={() => setDebugOpen(v => !v)}>
+              <Text style={styles.iconBtnText}>
+                {debugOpen ? 'Hide' : 'Debug'}
+              </Text>
+            </TouchableOpacity>
+          ) : null}
+
           <TouchableOpacity
-            style={styles.exitBtn}
+            style={[styles.iconBtn, styles.exitIconBtn]}
             onPress={() => navigation.goBack()}>
-            <Text style={styles.exitText}>Exit</Text>
+            <Text style={[styles.iconBtnText, styles.exitIconBtnText]}>Exit</Text>
           </TouchableOpacity>
         </View>
       </View>
 
-      {debugOpen ? (
+      {role === 'admin' && debugOpen ? (
         <View style={styles.debugPanel}>
           <Text style={styles.debugTitle}>Debug</Text>
           <Text style={styles.debugUrl} numberOfLines={1}>
@@ -639,6 +732,11 @@ export default function SippWebView() {
           if (url) {
             setCurrentUrl(url);
             pushLog(`loadEnd: ${url}`);
+          }
+
+          // After login, auto-redirect to the target form (then step 5 can run).
+          if (url && isSippUrl(url) && !isOnSippFormUrl(url)) {
+            injectAutoRedirectAfterLogin();
           }
 
           // If step 1 already ran and navigation happened, run step 2+3 on the new page.
@@ -703,6 +801,23 @@ export default function SippWebView() {
           try {
             pushLog(`msg: ${e.nativeEvent.data}`);
             const msg = JSON.parse(e.nativeEvent.data);
+            if (msg?.type === 'autoRedirect') {
+              // If we redirected after login, ensure the process starts from step 5.
+              if (msg?.phase === 'redirect' && processArmedRef.current) {
+                pushLog(`Auto-redirected to form; starting step 5`);
+                if (kpjList.length) {
+                  pendingStepRef.current = 5;
+                  setPendingStep(5);
+                  kpjIndexRef.current = 0;
+                  setKpjIndex(0);
+                  lastStep5UrlRef.current = null;
+                }
+              } else if (msg?.phase === 'redirect') {
+                // User hasn't pressed Process yet; do not start automation.
+                pushLog('Auto-redirected to form (waiting for Process press)');
+              }
+              return;
+            }
             if (msg?.type === 'process') {
               const step = msg?.step;
               const ok = msg?.ok === true;
@@ -823,6 +938,8 @@ export default function SippWebView() {
                       // Guard: don't save empty profile rows
                       const nik = String(msg?.nik ?? '');
                       const birthdate = String(msg?.birthdate ?? '');
+                      // Keep NIK for step 10 regardless of Firestore outcome
+                      foundNikRef.current = nik || null;
                       if (!nik && !birthdate) {
                         throw new Error('Extracted empty profile (nik/birthdate empty)');
                       }
@@ -842,7 +959,6 @@ export default function SippWebView() {
                         sourceUrl: currentUrl,
                       });
                       foundUserDocIdRef.current = ref.id;
-                      foundNikRef.current = nik || null;
                       pushLog(`Saved to Firestore foundUser: ${String(msg?.kpj ?? '')}`);
                     } catch (err: any) {
                       pushLog(`Firestore save error: ${err?.message ?? String(err)}`);
@@ -855,7 +971,8 @@ export default function SippWebView() {
                       if (nik) {
                         injectStep10KpuCheck(nik);
                       } else {
-                        // If no NIK, skip to step 11
+                        // If no NIK, we cannot search DPT — skip back and continue loop.
+                        pushLog('Skip DPT (KPU) because NIK is empty');
                         pendingStepRef.current = 11;
                         setPendingStep(11);
                         lastStep11UrlRef.current = null;
@@ -875,17 +992,53 @@ export default function SippWebView() {
               } else if (step === 10) {
                 // Step 10: KPU check result
                 if (ok && msg?.phase === 'result' && msg?.name) {
-                  text = `KPU name: ${String(msg.name)}`;
+                  const kpuName = String(msg.name);
+                  const isNotRegistered =
+                    kpuName.toLowerCase().includes('data anda belum terdaftar');
+
+                  if (isNotRegistered) {
+                    text = 'KPU: Data anda belum terdaftar! (deleting record)';
+                    (async () => {
+                      try {
+                        const docId = foundUserDocIdRef.current;
+                        if (docId) {
+                          await deleteDoc(doc(db, 'foundUser', docId));
+                          pushLog(`Deleted foundUser (KPU not registered): ${docId}`);
+                        } else {
+                          pushLog('No foundUser docId to delete');
+                        }
+                      } catch (err: any) {
+                        pushLog(
+                          `KPU deleteDoc error: ${err?.message ?? String(err)}`,
+                        );
+                      } finally {
+                        pendingStepRef.current = 11;
+                        setPendingStep(11);
+                        lastStep11UrlRef.current = null;
+                        injectStep10NavigateBack();
+                      }
+                    })();
+                  } else {
+                    text = `KPU name: ${kpuName}`;
                   (async () => {
                     try {
                       const docId = foundUserDocIdRef.current;
                       if (docId) {
                         await updateDoc(doc(db, 'foundUser', docId), {
-                          name: String(msg.name),
+                          name: kpuName,
                           nameSource: 'kpu',
+                          kelurahan: String(msg?.kelurahan ?? ''),
+                          kabupaten: String(msg?.kabupaten ?? ''),
                           updatedAt: serverTimestamp(),
                         });
-                        pushLog(`Updated foundUser name from KPU: ${String(msg.name)}`);
+                        pushLog(`Updated foundUser name from KPU: ${kpuName}`);
+                        if (msg?.kelurahan || msg?.kabupaten) {
+                          pushLog(
+                            `Updated wilayah: kelurahan=${String(
+                              msg?.kelurahan ?? '',
+                            )}, kabupaten=${String(msg?.kabupaten ?? '')}`,
+                          );
+                        }
                       } else {
                         pushLog('No foundUser docId to update');
                       }
@@ -898,6 +1051,7 @@ export default function SippWebView() {
                       injectStep10NavigateBack();
                     }
                   })();
+                  }
                 } else if (!ok && msg?.phase === 'result') {
                   text = msg?.reason ?? 'KPU result not found';
                   // still go back to SIPP
@@ -915,6 +1069,7 @@ export default function SippWebView() {
                 if (nextIndex >= kpjList.length) {
                   pendingStepRef.current = 0;
                   setPendingStep(0);
+                  setArmed(false);
                   pushLog('Loop finished (end of list)');
                 } else {
                   kpjIndexRef.current = nextIndex;
@@ -985,76 +1140,69 @@ export default function SippWebView() {
 
 const styles = StyleSheet.create({
   container: {flex: 1, backgroundColor: '#fff', paddingTop: normalize(30)},
-  actions: {
+  topBar: {
     flexDirection: 'row',
-    gap: normalize(10),
+    alignItems: 'center',
     paddingHorizontal: normalize(12),
     paddingVertical: normalize(10),
     borderBottomWidth: 1,
     borderBottomColor: '#eee',
     backgroundColor: '#fff',
   },
-  actionsRight: {
+  topBarLeft: {
     flex: 1,
-    flexDirection: 'row',
-    gap: normalize(10),
+    paddingRight: normalize(10),
   },
-  actionBtn: {
-    flex: 1,
-    height: normalize(42),
+  topBarTitle: {
+    fontSize: normalize(14),
+    fontWeight: '900',
+    color: '#111',
+  },
+  topBarSubtitle: {
+    marginTop: normalize(2),
+    fontSize: normalize(10),
+    color: '#777',
+  },
+  topBarRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: normalize(8),
+  },
+  processBtn: {
+    height: normalize(36),
+    paddingHorizontal: normalize(14),
     borderRadius: normalize(10),
     backgroundColor: '#007AFF',
     justifyContent: 'center',
     alignItems: 'center',
   },
-  actionBtnDisabled: {
-    opacity: 0.45,
-  },
-  actionText: {
+  processBtnDisabled: {opacity: 0.45},
+  processBtnText: {
     color: '#fff',
-    fontWeight: '700',
-    fontSize: normalize(14),
+    fontWeight: '800',
+    fontSize: normalize(13),
   },
-  actionBtnOutline: {
-    flex: 1,
-    height: normalize(42),
+  iconBtn: {
+    height: normalize(36),
+    paddingHorizontal: normalize(10),
     borderRadius: normalize(10),
-    backgroundColor: 'transparent',
+    backgroundColor: '#f2f3f7',
     borderWidth: 1,
-    borderColor: '#007AFF',
+    borderColor: '#e6e8ef',
     justifyContent: 'center',
     alignItems: 'center',
   },
-  actionTextOutline: {
-    color: '#007AFF',
-    fontWeight: '700',
-    fontSize: normalize(14),
-  },
-  debugBtn: {
-    width: normalize(78),
-    height: normalize(42),
-    borderRadius: normalize(10),
-    backgroundColor: '#111',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  debugText: {
-    color: '#fff',
+  iconBtnText: {
+    color: '#111',
     fontWeight: '800',
-    fontSize: normalize(14),
+    fontSize: normalize(12),
   },
-  exitBtn: {
-    width: normalize(78),
-    height: normalize(42),
-    borderRadius: normalize(10),
-    backgroundColor: '#ff3b30',
-    justifyContent: 'center',
-    alignItems: 'center',
+  exitIconBtn: {
+    backgroundColor: '#fff0ef',
+    borderColor: '#ffd1cf',
   },
-  exitText: {
-    color: '#fff',
-    fontWeight: '800',
-    fontSize: normalize(14),
+  exitIconBtnText: {
+    color: '#ff3b30',
   },
   loading: {
     ...StyleSheet.absoluteFillObject,
