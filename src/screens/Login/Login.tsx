@@ -12,9 +12,21 @@ import {
 } from 'react-native';
 import {useSafeAreaInsets} from 'react-native-safe-area-context';
 import normalize from 'react-native-normalize';
-import {collection, addDoc, serverTimestamp} from 'firebase/firestore';
+import {
+  addDoc,
+  collection,
+  getDocs,
+  limit,
+  query,
+  serverTimestamp,
+  where,
+} from 'firebase/firestore';
+import {useNavigation} from '@react-navigation/native';
+import type {NativeStackNavigationProp} from '@react-navigation/native-stack';
+import type {RootStackParamList} from '../../../App';
 import {db} from '../../utils/firebase';
 import {hashPassword} from '../../utils/crypto';
+import {saveSession} from '../../utils/session';
 
 interface LoginProps {
   onLogin?: (email: string, password: string) => void;
@@ -22,6 +34,8 @@ interface LoginProps {
 }
 
 const Login: React.FC<LoginProps> = ({onLogin, onSignUp}) => {
+  const navigation =
+    useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -39,11 +53,51 @@ const Login: React.FC<LoginProps> = ({onLogin, onSignUp}) => {
       if (onLogin) {
         await onLogin(email, password);
       } else {
-        // Default login logic or navigation
-        console.log('Login:', {email, password});
+        const hashedPassword = hashPassword(password);
+        const emailValue = email.trim().toLowerCase();
+
+        const q = query(
+          collection(db, 'users'),
+          where('email', '==', emailValue),
+          where('password', '==', hashedPassword),
+          limit(1),
+        );
+        const snap = await getDocs(q);
+
+        if (snap.empty) {
+          Alert.alert('Error', 'Invalid email or password');
+          return;
+        }
+
+        const userDoc = snap.docs[0];
+        const data = userDoc.data() as {active?: boolean; role?: string};
+
+        if (data.active === true) {
+          await saveSession({
+            userId: userDoc.id,
+            email: emailValue,
+            role: data.role,
+            active: true,
+          });
+          navigation.reset({
+            index: 0,
+            routes: [{name: 'MainTabs'}],
+          });
+          return;
+        }
+
+        // Not active yet -> go to waiting screen with userId
+        await saveSession({
+          userId: userDoc.id,
+          email: emailValue,
+          role: data.role,
+          active: false,
+        });
+        navigation.replace('Waiting', {userId: userDoc.id});
       }
     } catch (error) {
       console.error('Login error:', error);
+      Alert.alert('Error', 'Login failed. Please try again.');
     } finally {
       setIsLoading(false);
     }
@@ -74,7 +128,7 @@ const Login: React.FC<LoginProps> = ({onLogin, onSignUp}) => {
 
       // Create user document in Firestore
       const userData = {
-        active: true,
+        active: false,
         createdAt: serverTimestamp(),
         email: email.trim().toLowerCase(),
         password: hashedPassword,
@@ -82,18 +136,38 @@ const Login: React.FC<LoginProps> = ({onLogin, onSignUp}) => {
         updatedAt: serverTimestamp(),
       };
 
-      await addDoc(collection(db, 'users'), userData);
+      // Prevent duplicate emails
+      const emailValue = email.trim().toLowerCase();
+      const existsQ = query(
+        collection(db, 'users'),
+        where('email', '==', emailValue),
+        limit(1),
+      );
+      const existsSnap = await getDocs(existsQ);
+      if (!existsSnap.empty) {
+        Alert.alert('Error', 'Email already exists');
+        return;
+      }
+
+      const ref = await addDoc(collection(db, 'users'), {
+        ...userData,
+        email: emailValue,
+      });
 
       Alert.alert('Success', 'Account created successfully!', [
         {
           text: 'OK',
-          onPress: () => {
-            // Clear form
+          onPress: async () => {
+            // Clear form then go to waiting
             setEmail('');
             setPassword('');
-            if (onSignUp) {
-              onSignUp();
-            }
+            await saveSession({
+              userId: ref.id,
+              email: emailValue,
+              role: 'user',
+              active: false,
+            });
+            navigation.replace('Waiting', {userId: ref.id});
           },
         },
       ]);
@@ -111,7 +185,8 @@ const Login: React.FC<LoginProps> = ({onLogin, onSignUp}) => {
   return (
     <KeyboardAvoidingView
       style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+    >
       <View
         style={[
           styles.content,
@@ -119,7 +194,8 @@ const Login: React.FC<LoginProps> = ({onLogin, onSignUp}) => {
             paddingTop: Math.max(insets.top, normalize(40)),
             paddingBottom: insets.bottom,
           },
-        ]}>
+        ]}
+      >
         {/* Header */}
         <View style={styles.header}>
           <Text style={styles.title}>Welcome Back</Text>
@@ -162,7 +238,8 @@ const Login: React.FC<LoginProps> = ({onLogin, onSignUp}) => {
               <TouchableOpacity
                 style={styles.eyeButton}
                 onPress={() => setShowPassword(!showPassword)}
-                disabled={isLoading}>
+                disabled={isLoading}
+              >
                 <Text style={styles.eyeButtonText}>
                   {showPassword ? 'Hide' : 'Show'}
                 </Text>
@@ -171,9 +248,7 @@ const Login: React.FC<LoginProps> = ({onLogin, onSignUp}) => {
           </View>
 
           {/* Forgot Password */}
-          <TouchableOpacity
-            style={styles.forgotPassword}
-            disabled={isLoading}>
+          <TouchableOpacity style={styles.forgotPassword} disabled={isLoading}>
             <Text style={styles.forgotPasswordText}>Forgot Password?</Text>
           </TouchableOpacity>
 
@@ -185,7 +260,8 @@ const Login: React.FC<LoginProps> = ({onLogin, onSignUp}) => {
                 styles.loginButtonDisabled,
             ]}
             onPress={handleLogin}
-            disabled={!email.trim() || !password.trim() || isLoading}>
+            disabled={!email.trim() || !password.trim() || isLoading}
+          >
             {isLoading ? (
               <ActivityIndicator color="#fff" />
             ) : (
@@ -201,7 +277,8 @@ const Login: React.FC<LoginProps> = ({onLogin, onSignUp}) => {
                 styles.signUpButtonDisabled,
             ]}
             onPress={handleSignUp}
-            disabled={!email.trim() || !password.trim() || isLoading}>
+            disabled={!email.trim() || !password.trim() || isLoading}
+          >
             {isLoading ? (
               <ActivityIndicator color="#007AFF" />
             ) : (
@@ -339,4 +416,3 @@ const styles = StyleSheet.create({
 });
 
 export default Login;
-

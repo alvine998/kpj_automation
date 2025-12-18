@@ -4,12 +4,14 @@ import {getFirestore, Timestamp} from 'firebase/firestore';
 // TODO: Replace with your Firebase configuration
 // Get these values from your Firebase project settings
 const firebaseConfig = {
-  apiKey: 'YOUR_API_KEY',
-  authDomain: 'YOUR_AUTH_DOMAIN',
-  projectId: 'YOUR_PROJECT_ID',
-  storageBucket: 'YOUR_STORAGE_BUCKET',
-  messagingSenderId: 'YOUR_MESSAGING_SENDER_ID',
-  appId: 'YOUR_APP_ID',
+  apiKey: "AIzaSyApj6QD4ccBcf2Wy7U0ftNniFwckb_owo0",
+  authDomain: "chatonly-db137.firebaseapp.com",
+  databaseURL: "https://chatonly-db137-default-rtdb.firebaseio.com",
+  projectId: "chatonly-db137",
+  storageBucket: "chatonly-db137.firebasestorage.app",
+  messagingSenderId: "850049908643",
+  appId: "1:850049908643:web:1fd0c039470c295a256416",
+  measurementId: "G-WEHNW1EM7Y"
 };
 
 // Initialize Firebase
