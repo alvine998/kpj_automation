@@ -39,21 +39,24 @@ export default function SippWebView() {
   const [currentUrl, setCurrentUrl] = useState<string>(
     'https://sipp.bpjsketenagakerjaan.go.id/',
   );
+  const [webSourceUrl, setWebSourceUrl] = useState<string>(
+    'https://sipp.bpjsketenagakerjaan.go.id/',
+  );
   const [debugOpen, setDebugOpen] = useState(true);
   const [debugLogs, setDebugLogs] = useState<string[]>([]);
   // Only run automation after user explicitly presses Process.
   const [processArmed, setProcessArmed] = useState(false);
   const processArmedRef = useRef(false);
-  const [pendingStep, setPendingStep] = useState<0 | 2 | 4 | 5 | 9 | 10 | 11>(0);
-  const pendingStepRef = useRef<0 | 2 | 4 | 5 | 9 | 10 | 11>(0);
-  const lastStep2UrlRef = useRef<string | null>(null);
-  const lastStep4UrlRef = useRef<string | null>(null);
+  const loopInitializedRef = useRef(false);
+  const [pendingStep, setPendingStep] = useState<0 | 5 | 9 | 11>(0);
+  const pendingStepRef = useRef<0 | 5 | 9 | 11>(0);
   const lastStep5UrlRef = useRef<string | null>(null);
   const lastStep9UrlRef = useRef<string | null>(null);
-  const lastStep10UrlRef = useRef<string | null>(null);
   const lastStep11UrlRef = useRef<string | null>(null);
   const kpjIndexRef = useRef<number>(0);
   const [kpjIndex, setKpjIndex] = useState(0);
+  const checkedSetRef = useRef<Set<string>>(new Set());
+  const [checkedCount, setCheckedCount] = useState(0);
   const [foundCount, setFoundCount] = useState(0);
   const [notFoundCount, setNotFoundCount] = useState(0);
   const [userId, setUserId] = useState<string | null>(null);
@@ -61,6 +64,10 @@ export default function SippWebView() {
   const foundKpjRef = useRef<string | null>(null);
   const foundUserDocIdRef = useRef<string | null>(null);
   const foundNikRef = useRef<string | null>(null);
+  // Race condition guards
+  const step9InjectionLockRef = useRef<boolean>(false);
+  const step5InjectionLockRef = useRef<boolean>(false);
+  const profileCheckLockRef = useRef<boolean>(false);
 
   useEffect(() => {
     (async () => {
@@ -103,6 +110,13 @@ export default function SippWebView() {
     });
   };
 
+  const markChecked = (kpjRaw: any) => {
+    const kpj = String(kpjRaw ?? '').trim();
+    if (!kpj) return;
+    checkedSetRef.current.add(kpj);
+    setCheckedCount(checkedSetRef.current.size);
+  };
+
   const setArmed = (v: boolean) => {
     processArmedRef.current = v;
     setProcessArmed(v);
@@ -113,6 +127,48 @@ export default function SippWebView() {
     normalizeUrl(url).startsWith('https://sipp.bpjsketenagakerjaan.go.id');
   const isOnSippFormUrl = (url: string) =>
     normalizeUrl(url).startsWith(normalizeUrl(SIPP_FORM_URL));
+  const isOnProfilePage = (url: string) => {
+    const normalized = normalizeUrl(url);
+    // Profile page is typically after clicking "Lanjutkan" - check for profile-related paths
+    // Common patterns: /form-tambah/... (but not /form-tambah/kpj), or contains profile indicators
+    // Also check if URL contains identifiers that suggest it's a profile/edit page
+    const isFormTambah = normalized.includes('/form-tambah/');
+    const isNotKpjPage = !normalized.endsWith('/kpj') && !normalized.endsWith('/form-tambah-tk-individu');
+    const hasProfileIndicators = normalized.includes('/edit') || normalized.includes('/profile') || normalized.includes('/data');
+    return (isFormTambah && isNotKpjPage) || hasProfileIndicators;
+  };
+  
+  const checkProfilePageReady = () => {
+    // Inject a quick check to see if profile fields are present
+    webRef.current?.injectJavaScript(`
+      (function() {
+        var hasNik = document.querySelector('#no_identitas, input[name="no_identitas"], #nik, input[name="nik"]');
+        var hasBirthdate = document.querySelector('#tgl_lahir, input[name="tgl_lahir"], #birthdate, input[name="birthdate"]');
+        var hasName = document.querySelector('#nama_lengkap, input[name="nama_lengkap"]');
+        var isReady = (hasNik || hasBirthdate) && hasName;
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'profileCheck',
+          ready: isReady,
+          hasNik: !!hasNik,
+          hasBirthdate: !!hasBirthdate,
+          hasName: !!hasName,
+          url: location.href
+        }));
+      })();
+      true;
+    `);
+  };
+
+  const withCacheBuster = (url: string) => {
+    const sep = url.includes('?') ? '&' : '?';
+    return `${url}${sep}t=${Date.now()}`;
+  };
+
+  const resetStepUrls = () => {
+    lastStep5UrlRef.current = null;
+    lastStep9UrlRef.current = null;
+    lastStep11UrlRef.current = null;
+  };
 
   const injectAutoRedirectAfterLogin = () => {
     // Heuristic DOM check: if we look logged-in, jump to the TK individu form.
@@ -170,116 +226,20 @@ export default function SippWebView() {
     `);
   };
 
-  const injectStep2And3 = () => {
-    // Step 2: click SweetAlert2 OK
-    // Step 3: click modal close X
-    webRef.current?.injectJavaScript(`
-      (function () {
-        function post(step, ok, extra) {
-          try {
-            window.ReactNativeWebView.postMessage(JSON.stringify(Object.assign({type:'process', step:step, ok:ok}, extra || {})));
-          } catch (e) {}
-        }
-
-        function clickWithEvent(el) {
-          try {
-            el.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
-            return true;
-          } catch (e) {
-            try { el.click(); return true; } catch (e2) {}
-          }
-          return false;
-        }
-
-        var okSel = 'button.swal2-confirm, .swal2-container button.swal2-confirm, button.swal2-confirm.swal2-styled';
-        var closeSel = 'button.close[data-dismiss="modal"]';
-
-        // wait for OK, click it, then wait for close and click it
-        var attempts = 0;
-        var maxAttempts = 60; // ~15s
-        var okInterval = setInterval(function(){
-          attempts++;
-          var okBtn = document.querySelector(okSel);
-          if (okBtn) {
-            clickWithEvent(okBtn);
-            clearInterval(okInterval);
-            post(2, true, {label:'OK button', attempts: attempts});
-
-            // now close
-            var closeAttempts = 0;
-            var closeMax = 60;
-            var closeInterval = setInterval(function(){
-              closeAttempts++;
-              var closeBtn = document.querySelector(closeSel);
-              if (closeBtn) {
-                clickWithEvent(closeBtn);
-                clearInterval(closeInterval);
-                post(3, true, {label:'Close (×) button', attempts: closeAttempts});
-              } else if (closeAttempts >= closeMax) {
-                clearInterval(closeInterval);
-                post(3, false, {reason:'Close (×) button not found', attempts: closeAttempts});
-              }
-            }, 1000);
-          } else if (attempts >= maxAttempts) {
-            clearInterval(okInterval);
-            post(2, false, {reason:'OK button not found', attempts: attempts});
-          }
-        }, 1000);
-      })();
-      true;
-    `);
-    pushLog('Injected step 2+3');
-  };
-
-  const injectStep4TambahTk = () => {
-    webRef.current?.injectJavaScript(`
-      (function () {
-        function post(step, ok, extra) {
-          try {
-            window.ReactNativeWebView.postMessage(JSON.stringify(Object.assign({type:'process', step:step, ok:ok}, extra || {})));
-          } catch (e) {}
-        }
-
-        function clickWithEvent(el) {
-          try {
-            el.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
-            return true;
-          } catch (e) {
-            try { el.click(); return true; } catch (e2) {}
-          }
-          return false;
-        }
-
-        var href = '/tenaga-kerja/baru/form-tambah-tk-individu';
-        var attempts = 0;
-        var maxAttempts = 60; // ~15s
-        var interval = setInterval(function(){
-          attempts++;
-          var el = document.querySelector('a[href="' + href + '"]');
-          if (!el) {
-            // fallback: find by text
-            var links = Array.prototype.slice.call(document.querySelectorAll('a'));
-            el = links.find(function(a){
-              return ((a.textContent || '').trim().toLowerCase() === 'tambah tk');
-            }) || null;
-          }
-
-          if (el) {
-            clickWithEvent(el);
-            clearInterval(interval);
-            post(4, true, {label:'Tambah TK', attempts: attempts});
-          } else if (attempts >= maxAttempts) {
-            clearInterval(interval);
-            post(4, false, {reason:'Tambah TK link not found', attempts: attempts});
-          }
-        }, 1000);
-      })();
-      true;
-    `);
-    pushLog('Injected step 4 (Tambah TK)');
-  };
 
   const injectSteps5to8ForKpj = (kpj: string) => {
+    // Guard against race condition: prevent multiple simultaneous injections
+    if (step5InjectionLockRef.current) {
+      pushLog(`⚠️ Step 5-8 injection already in progress, skipping duplicate for KPJ ${kpj}`);
+      return;
+    }
+    step5InjectionLockRef.current = true;
+    
+    // Reset lock after 10 seconds (safety timeout)
+    setTimeout(() => {
+      step5InjectionLockRef.current = false;
+    }, 10000);
+    
     webRef.current?.injectJavaScript(`
       (function () {
         function post(step, ok, extra) {
@@ -372,11 +332,35 @@ export default function SippWebView() {
 
             var txt = (contentEl.textContent || '');
             var low = txt.toLowerCase();
+            
+            // Check for "KPJ sudah tidak dapat digunakan"
+            var tidakDapatDigunakan = low.indexOf('sudah tidak dapat digunakan') !== -1;
+            // Check for "terdaftar sebagai peserta BPJS Ketenagakerjaan"
             var registered = low.indexOf('terdaftar sebagai peserta bpjs ketenagakerjaan') !== -1;
 
-            if (registered) {
-              var lanjutkan = Array.prototype.slice.call(document.querySelectorAll('button'))
-                .find(function(b){ return ((b.textContent || '').trim().toLowerCase() === 'lanjutkan'); }) || null;
+            if (tidakDapatDigunakan) {
+              // Case: KPJ tidak dapat digunakan - klik OK dan lanjut ke KPJ berikutnya
+              var okBtn = document.querySelector('button.swal2-confirm.swal2-styled') || null;
+              if (!okBtn) {
+                okBtn = Array.prototype.slice.call(document.querySelectorAll('button'))
+                  .find(function(b){ return ((b.textContent || '').trim().toLowerCase() === 'ok'); }) || null;
+              }
+              if (!okBtn) {
+                okBtn = document.querySelector('button.swal2-confirm');
+              }
+              if (okBtn) {
+                clickWithEvent(okBtn);
+                post(8, true, {kpj: kpj, found:false, cannotUse:true, text: txt});
+              } else {
+                post(8, false, {reason:'OK button not found (cannot use)', kpj: kpj});
+              }
+            } else if (registered) {
+              // Case: Terdaftar - klik Lanjutkan untuk ke profile page
+              var lanjutkan = document.querySelector('button.swal2-confirm.btn.btn-success.swal2-styled') || null;
+              if (!lanjutkan) {
+                lanjutkan = Array.prototype.slice.call(document.querySelectorAll('button'))
+                  .find(function(b){ return ((b.textContent || '').trim().toLowerCase() === 'lanjutkan'); }) || null;
+              }
               if (!lanjutkan) {
                 lanjutkan = document.querySelector('button.swal2-confirm.btn.btn-success');
               }
@@ -387,6 +371,7 @@ export default function SippWebView() {
                 post(8, false, {reason:'Lanjutkan button not found', kpj: kpj});
               }
             } else {
+              // Other cases - try OK button
               var okBtn = Array.prototype.slice.call(document.querySelectorAll('button'))
                 .find(function(b){ return ((b.textContent || '').trim().toLowerCase() === 'ok'); }) || null;
               if (!okBtn) {
@@ -410,6 +395,23 @@ export default function SippWebView() {
   };
 
   const injectStep9ExtractProfile = () => {
+    // Guard against race condition: prevent multiple simultaneous injections
+    if (step9InjectionLockRef.current) {
+      pushLog('⚠️ Step 9 injection already in progress, skipping duplicate');
+      return;
+    }
+    step9InjectionLockRef.current = true;
+    pushLog('🔒 Step 9 injection lock acquired - starting extraction');
+    
+    // Reset lock after 15 seconds (safety timeout) - increased for profile extraction
+    // Lock will be released when step 9 message is received, but this is a safety net
+    setTimeout(() => {
+      if (step9InjectionLockRef.current) {
+        pushLog('⚠️ Step 9 lock timeout - releasing lock (safety timeout)');
+        step9InjectionLockRef.current = false;
+      }
+    }, 15000);
+    
     // Extract values from the profile form (readonly fields) after "Lanjutkan"
     webRef.current?.injectJavaScript(`
       (function () {
@@ -430,12 +432,36 @@ export default function SippWebView() {
           return v || '';
         }
 
+        function onlyDigits(s) {
+          try { return String(s || '').replace(/\\D+/g, ''); } catch (e) {}
+          return '';
+        }
+
         function firstVal(selectors) {
           for (var i = 0; i < selectors.length; i++) {
             var el = document.querySelector(selectors[i]);
             var v = getVal(el);
             if (v) return v;
           }
+          return '';
+        }
+
+        function guessNikFromInputs() {
+          try {
+            var inputs = Array.prototype.slice.call(document.querySelectorAll('input'));
+            for (var i = 0; i < inputs.length; i++) {
+              var el = inputs[i];
+              var id = String(el.id || '').toLowerCase();
+              var name = String(el.getAttribute('name') || '').toLowerCase();
+              var ph = String(el.getAttribute('placeholder') || '').toLowerCase();
+              if (id.indexOf('identitas') !== -1 || id.indexOf('nik') !== -1 ||
+                  name.indexOf('identitas') !== -1 || name.indexOf('nik') !== -1 ||
+                  ph.indexOf('nik') !== -1) {
+                var v = onlyDigits(getVal(el));
+                if (v && v.length >= 12) return v;
+              }
+            }
+          } catch (e) {}
           return '';
         }
 
@@ -453,18 +479,24 @@ export default function SippWebView() {
         }
 
         function extract() {
+          var rawNik =
+            firstVal(['#no_identitas','input[name="no_identitas"]','#nik','input[name="nik"]','input[name="no_identitas_peserta"]']) ||
+            guessNikFromInputs();
+          var nikDigits = onlyDigits(rawNik);
           var payload = {
             kpj: firstVal(['#kpj','input[name="kpj"]']),
-            nik: firstVal(['#no_identitas','input[name="no_identitas"]','#nik','input[name="nik"]']),
+            nik: nikDigits,
+            name: firstVal(['#nama_lengkap','input[name="nama_lengkap"]']),
             birthdate: firstVal(['#tgl_lahir','input[name="tgl_lahir"]','#birthdate','input[name="birthdate"]']),
             gender: firstVal(['#jenis_kelamin','input[name="jenis_kelamin"]','#gender','input[name="gender"]']),
             marritalStatus: selectedText(['#status_kawin','select[name="status_kawin"]']),
             address: firstVal(['#alamat','input[name="alamat"]','#address','input[name="address"]']),
+            postalCode: firstVal(['#kode_pos','input[name="kode_pos"]']),
             phone: firstVal(['#no_handphone','input[name="no_handphone"]','#phone','input[name="phone"]']),
             npwp: firstVal(['#npwp','input[name="npwp"]']),
             email: firstVal(['#email','input[name="email"]']),
-            name: firstVal(['#nama_lengkap','input[name="nama_lengkap"]']),
-            validasiLasik: ""
+            validasiLasik: "",
+            validasiDPT: false
           };
           return payload;
         }
@@ -478,143 +510,44 @@ export default function SippWebView() {
           var hasProfile = (payload.nik && payload.nik.length >= 8) || (payload.birthdate && payload.birthdate.length >= 4);
           if (hasProfile) {
             clearInterval(interval);
-            post(9, true, Object.assign(payload, {attempts: attempts, url: location.href}));
+            console.log('[Step 9] Profile extracted:', JSON.stringify(payload));
+            var fullPayload = Object.assign(payload, {attempts: attempts, url: location.href});
+            console.log('[Step 9] Sending message with payload:', JSON.stringify(fullPayload));
+            post(9, true, fullPayload);
+            // Lock will be released after Firestore save completes or on error
           } else if (attempts >= maxAttempts) {
             clearInterval(interval);
+            console.log('[Step 9] Failed: Profile fields not ready. Sample:', JSON.stringify(payload));
             post(9, false, {reason:'Profile fields not ready (nik/birthdate empty)', attempts: attempts, url: location.href, sample: payload});
+            // Release lock on failure - send unlock message
+            try {
+              window.ReactNativeWebView.postMessage(JSON.stringify({type:'step9Unlock'}));
+            } catch (e) {
+              console.error('[Step 9] Failed to send unlock message:', e);
+            }
+          } else {
+            // Log progress every 5 attempts
+            if (attempts % 5 === 0) {
+              console.log('[Step 9] Waiting for profile... attempt', attempts, 'nik:', payload.nik, 'birthdate:', payload.birthdate);
+            }
           }
         }, 1000);
       })();
       true;
     `);
-    pushLog('Injected step 9 (extract profile)');
+    pushLog('✅ Injected step 9 (extract profile) - waiting for profile fields...');
+    pushLog('📤 Step 9 JavaScript injected, waiting for extraction result...');
   };
 
-  const injectStep10NavigateBack = () => {
-    const target = `${SIPP_FORM_URL}#`;
-    webRef.current?.injectJavaScript(`
-      (function () {
-        try {
-          window.location.href = ${JSON.stringify(target)};
-          window.ReactNativeWebView.postMessage(JSON.stringify({type:'process', step:11, ok:true, url:${JSON.stringify(target)}}));
-        } catch (e) {
-          window.ReactNativeWebView.postMessage(JSON.stringify({type:'process', step:11, ok:false, reason:String(e)}));
-        }
-      })();
-      true;
-    `);
-    pushLog('Injected step 11 (navigate back to form)');
-  };
-
-  const injectStep10KpuCheck = (nik: string) => {
-    // Navigate to KPU DPT online, fill NIK, click Pencarian, extract name from h2 b.
-    // Then send it back to RN to update Firestore.
-    webRef.current?.injectJavaScript(`
-      (function () {
-        function post(step, ok, extra) {
-          try {
-            window.ReactNativeWebView.postMessage(JSON.stringify(Object.assign({type:'process', step:step, ok:ok}, extra || {})));
-          } catch (e) {}
-        }
-
-        var target = 'https://cekdptonline.kpu.go.id/';
-        var nik = ${JSON.stringify(nik)};
-
-        function clickWithEvent(el) {
-          try {
-            el.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
-            return true;
-          } catch (e) {
-            try { el.click(); return true; } catch (e2) {}
-          }
-          return false;
-        }
-
-        try {
-          if (location.href.indexOf('cekdptonline.kpu.go.id') === -1) {
-            location.href = target;
-            post(10, true, {phase:'navigate', url: target});
-            return true;
-          }
-
-          // Wait for input id="__BVID__20"
-          var attempts = 0;
-          var maxAttempts = 60; // 60s
-          var interval = setInterval(function(){
-            attempts++;
-            var input = document.querySelector('input#__BVID__20');
-            if (!input) {
-              if (attempts >= maxAttempts) {
-                clearInterval(interval);
-                post(10, false, {phase:'input', reason:'NIK input not found', attempts: attempts});
-              }
-              return;
-            }
-
-            try {
-              input.focus();
-              input.value = nik;
-              input.dispatchEvent(new Event('input', {bubbles:true}));
-              input.dispatchEvent(new Event('change', {bubbles:true}));
-            } catch (e) {}
-
-            // Find button containing "Pencarian"
-            var btns = Array.prototype.slice.call(document.querySelectorAll('button'));
-            var searchBtn = btns.find(function(b){
-              return (b.textContent || '').toLowerCase().indexOf('pencarian') !== -1;
-            }) || null;
-            if (searchBtn) {
-              clickWithEvent(searchBtn);
-              post(10, true, {phase:'search', attempts: attempts});
-            } else {
-              post(10, false, {phase:'search', reason:'Pencarian button not found'});
-            }
-
-            clearInterval(interval);
-
-            // Wait for result h2.mb-2 b + optional Kelurahan/Kabupaten in a <p> with 2 <b> tags
-            var rAttempts = 0;
-            var rMax = 60;
-            var rInt = setInterval(function(){
-              rAttempts++;
-              var b = document.querySelector('h2.mb-2 b');
-              var name = b ? (b.textContent || '').trim() : '';
-              if (name) {
-                // Try parse kelurahan/kabupaten from the paragraph
-                var p = Array.prototype.slice.call(document.querySelectorAll('p'))
-                  .find(function(x){
-                    var t = (x.textContent || '').toLowerCase();
-                    return t.indexOf('anda telah terdaftar') !== -1 && t.indexOf('kelurahan') !== -1;
-                  }) || null;
-                var kelurahan = '';
-                var kabupaten = '';
-                if (p) {
-                  var bs = p.querySelectorAll('b');
-                  if (bs && bs.length >= 1) kelurahan = (bs[0].textContent || '').trim();
-                  if (bs && bs.length >= 2) kabupaten = (bs[1].textContent || '').trim();
-                }
-                clearInterval(rInt);
-                post(10, true, {phase:'result', nik: nik, name: name, kelurahan: kelurahan, kabupaten: kabupaten});
-              } else if (rAttempts >= rMax) {
-                clearInterval(rInt);
-                post(10, false, {phase:'result', reason:'Name result not found', nik: nik});
-              }
-            }, 1000);
-          }, 1000);
-        } catch (e) {
-          post(10, false, {phase:'error', reason:String(e)});
-        }
-      })();
-      true;
-    `);
-    pushLog(`Injected step 10 (KPU check) for NIK ${nik}`);
-  };
 
   const onPressProcess = () => {
     pushLog('Process pressed (start from step 5)');
     // reset counters for a fresh run
     setFoundCount(0);
     setNotFoundCount(0);
+    checkedSetRef.current = new Set();
+    setCheckedCount(0);
+    loopInitializedRef.current = true;
 
     if (!kpjList.length) {
       Alert.alert('KPJ list empty', 'Go to Beranda → Generate → Cari Data');
@@ -630,12 +563,9 @@ export default function SippWebView() {
     setPendingStep(5);
     kpjIndexRef.current = 0;
     setKpjIndex(0);
-    lastStep5UrlRef.current = null;
-    lastStep2UrlRef.current = null;
-    lastStep4UrlRef.current = null;
-    lastStep9UrlRef.current = null;
-    lastStep10UrlRef.current = null;
-    lastStep11UrlRef.current = null;
+    checkedSetRef.current = new Set();
+    setCheckedCount(0);
+    resetStepUrls();
 
     if (!isOnSippFormUrl(currentUrl)) {
       // Navigate to the correct form first; step 5 will run on loadEnd.
@@ -665,6 +595,9 @@ export default function SippWebView() {
           </Text>
           <Text style={styles.topBarSubtitle} numberOfLines={1}>
             {normalizeUrl(currentUrl)}
+          </Text>
+          <Text style={styles.topBarSubtitle} numberOfLines={1}>
+            Progress: {checkedCount}/{kpjList.length || 0}
           </Text>
         </View>
 
@@ -720,7 +653,7 @@ export default function SippWebView() {
 
       <WebView
         ref={webRef}
-        source={{uri: 'https://sipp.bpjsketenagakerjaan.go.id/'}}
+        source={{uri: webSourceUrl}}
         onNavigationStateChange={nav => {
           if (nav?.url) {
             setCurrentUrl(nav.url);
@@ -739,68 +672,106 @@ export default function SippWebView() {
             injectAutoRedirectAfterLogin();
           }
 
-          // If step 1 already ran and navigation happened, run step 2+3 on the new page.
-          if (pendingStepRef.current === 2 && url) {
-            const normalized = normalizeUrl(url);
-            if (lastStep2UrlRef.current !== normalized) {
-              lastStep2UrlRef.current = normalized;
-              injectStep2And3();
-            }
-          }
-
-          // If step 4 pending, run it on the new page (or after navigation).
-          if (pendingStepRef.current === 4 && url) {
-            const normalized = normalizeUrl(url);
-            if (lastStep4UrlRef.current !== normalized) {
-              lastStep4UrlRef.current = normalized;
-              injectStep4TambahTk();
-            }
-          }
-
           // If step 5 pending, run it on the new page (or after navigation).
           if (pendingStepRef.current === 5 && url) {
             const normalized = normalizeUrl(url);
-            if (lastStep5UrlRef.current !== normalized) {
+            if (lastStep5UrlRef.current !== normalized && !step5InjectionLockRef.current) {
               lastStep5UrlRef.current = normalized;
               const kpj = kpjList[kpjIndexRef.current];
-              if (kpj) injectSteps5to8ForKpj(kpj);
+              if (kpj) {
+                pushLog(`Step 5: Injecting for KPJ ${kpj} (index ${kpjIndexRef.current})`);
+                injectSteps5to8ForKpj(kpj);
+              }
+            } else if (step5InjectionLockRef.current) {
+              pushLog('Step 5: Injection locked, skipping');
             }
           }
 
           // If step 9 pending, extract profile on the new page.
+          // Always check if profile fields are ready (regardless of URL)
           if (pendingStepRef.current === 9 && url) {
             const normalized = normalizeUrl(url);
-            if (lastStep9UrlRef.current !== normalized) {
-              lastStep9UrlRef.current = normalized;
-              injectStep9ExtractProfile();
+            pushLog(`Step 9 pending: url=${url}, lastStep9Url=${lastStep9UrlRef.current}, lock=${step9InjectionLockRef.current}`);
+            
+            if (lastStep9UrlRef.current !== normalized && !step9InjectionLockRef.current) {
+              // Always check if profile fields are ready before injecting
+              // This works even if URL hasn't changed but fields are loaded via AJAX
+              checkProfilePageReady();
+              // Will inject step 9 when profileCheck message confirms fields are ready
+            } else if (step9InjectionLockRef.current) {
+              pushLog('Step 9: Injection locked, will retry after unlock');
+            } else {
+              pushLog('Step 9: Already checked for this URL, will retry if fields not ready');
+              // Retry check in case fields loaded after initial check
+              setTimeout(() => {
+                if (pendingStepRef.current === 9 && !step9InjectionLockRef.current) {
+                  checkProfilePageReady();
+                }
+              }, 1000);
             }
           }
 
-          // If step 10 pending, ensure we do the KPU lookup on the new page
-          if (pendingStepRef.current === 10 && url) {
-            const normalized = normalizeUrl(url);
-            if (lastStep10UrlRef.current !== normalized) {
-              lastStep10UrlRef.current = normalized;
-              const nik = foundNikRef.current;
-              if (nik) {
-                injectStep10KpuCheck(nik);
-              }
-            }
-          }
-
-          // If step 11 pending, ensure we navigate back (in case previous injection was cancelled by navigation)
-          if (pendingStepRef.current === 11 && url) {
-            const normalized = normalizeUrl(url);
-            if (lastStep11UrlRef.current !== normalized) {
-              lastStep11UrlRef.current = normalized;
-              injectStep10NavigateBack();
-            }
-          }
+          // Step 11 is now handled in step 9's finally block
+          // This section is kept for backward compatibility
         }}
         onMessage={e => {
           try {
             pushLog(`msg: ${e.nativeEvent.data}`);
             const msg = JSON.parse(e.nativeEvent.data);
+            
+            // Handle profile page readiness check
+            if (msg?.type === 'profileCheck' && pendingStepRef.current === 9) {
+              // Guard against race condition: prevent multiple concurrent profile checks
+              if (profileCheckLockRef.current) {
+                pushLog('⚠️ Profile check already in progress, ignoring duplicate');
+                return;
+              }
+              
+              const isReady = msg?.ready === true;
+              const url = msg?.url || currentUrl;
+              pushLog(`Profile check: ready=${isReady}, hasNik=${msg?.hasNik}, hasBirthdate=${msg?.hasBirthdate}, hasName=${msg?.hasName}, url=${url}, lock=${step9InjectionLockRef.current}`);
+              
+              if (isReady) {
+                profileCheckLockRef.current = true;
+                const normalized = normalizeUrl(url);
+                if (!step9InjectionLockRef.current) {
+                  lastStep9UrlRef.current = normalized;
+                  pushLog('✅ Step 9: Profile fields ready, injecting extract profile NOW');
+                  injectStep9ExtractProfile();
+                } else {
+                  pushLog('⚠️ Step 9: Injection already in progress, will retry after unlock');
+                  // Retry after lock is released
+                  setTimeout(() => {
+                    if (pendingStepRef.current === 9 && !step9InjectionLockRef.current) {
+                      pushLog('Step 9: Retrying injection after unlock');
+                      injectStep9ExtractProfile();
+                    }
+                  }, 2000);
+                }
+                // Reset lock after 1 second
+                setTimeout(() => {
+                  profileCheckLockRef.current = false;
+                }, 1000);
+              } else {
+                pushLog(`⏳ Step 9: Profile fields not ready yet (hasNik=${msg?.hasNik}, hasBirthdate=${msg?.hasBirthdate}, hasName=${msg?.hasName})`);
+                // Retry after delay if still pending
+                setTimeout(() => {
+                  if (pendingStepRef.current === 9 && !profileCheckLockRef.current) {
+                    pushLog('Step 9: Retrying profile check...');
+                    checkProfilePageReady();
+                  }
+                }, 2000);
+              }
+              return;
+            }
+            
+            // Handle step 9 unlock message (from JavaScript on failure)
+            if (msg?.type === 'step9Unlock') {
+              step9InjectionLockRef.current = false;
+              pushLog('Step 9 lock released (from JS)');
+              return;
+            }
+            
             if (msg?.type === 'autoRedirect') {
               // If we redirected after login, ensure the process starts from step 5.
               if (msg?.phase === 'redirect' && processArmedRef.current) {
@@ -808,8 +779,12 @@ export default function SippWebView() {
                 if (kpjList.length) {
                   pendingStepRef.current = 5;
                   setPendingStep(5);
-                  kpjIndexRef.current = 0;
-                  setKpjIndex(0);
+                  // IMPORTANT: do not reset loop index during an active run,
+                  // otherwise it will restart from the first KPJ.
+                  if (!loopInitializedRef.current) {
+                    kpjIndexRef.current = 0;
+                    setKpjIndex(0);
+                  }
                   lastStep5UrlRef.current = null;
                 }
               } else if (msg?.phase === 'redirect') {
@@ -823,71 +798,7 @@ export default function SippWebView() {
               const ok = msg?.ok === true;
               let text = 'Process';
 
-              if (step === 1) {
-                text = ok
-                  ? msg?.id
-                    ? `Clicked Edit (${msg.id})`
-                    : 'Clicked Edit'
-                  : msg?.reason ?? 'Edit link not found';
-                if (ok) {
-                  // mark pending steps for next page load (navigation may replace JS context)
-                  pendingStepRef.current = 2;
-                  setPendingStep(2);
-                  lastStep2UrlRef.current = null;
-                  lastStep4UrlRef.current = null;
-                  pushLog('Pending step 2+3');
-                }
-              } else if (step === 2) {
-                text = ok ? 'Clicked OK' : msg?.reason ?? 'OK button not found';
-                // If OK wasn't found, keep pending to retry on next load / manual refresh.
-                if (ok) {
-                  // keep pending until step 3 completes
-                  pendingStepRef.current = 2;
-                  setPendingStep(2);
-                }
-              } else if (step === 3) {
-                text = ok
-                  ? 'Closed modal (×)'
-                  : msg?.reason ?? 'Close (×) button not found';
-                // After step 3, proceed to step 4.
-                if (ok) {
-                  pendingStepRef.current = 4;
-                  setPendingStep(4);
-                  lastStep4UrlRef.current = null;
-                  pushLog('Pending step 4 (Tambah TK)');
-                  // Try immediately on the current page too (in case no navigation happens)
-                  injectStep4TambahTk();
-                } else {
-                  // stop auto-running unless user presses Process again.
-                  pendingStepRef.current = 0;
-                  setPendingStep(0);
-                  lastStep2UrlRef.current = null;
-                  lastStep4UrlRef.current = null;
-                }
-              } else if (step === 4) {
-                text = ok ? 'Clicked Tambah TK' : msg?.reason ?? 'Tambah TK not found';
-                if (ok) {
-                  if (!kpjList.length) {
-                    text = 'KPJ list empty (Beranda → Generate → Cari Data)';
-                    pendingStepRef.current = 0;
-                    setPendingStep(0);
-                  } else {
-                    pendingStepRef.current = 5;
-                    setPendingStep(5);
-                    kpjIndexRef.current = 0;
-                    setKpjIndex(0);
-                    lastStep5UrlRef.current = null;
-                    pushLog('Pending step 5 (loop KPJ)');
-                    injectSteps5to8ForKpj(kpjList[0]);
-                  }
-                } else {
-                  pendingStepRef.current = 0;
-                  setPendingStep(0);
-                }
-                lastStep2UrlRef.current = null;
-                lastStep4UrlRef.current = null;
-                lastStep5UrlRef.current = null;
-              } else if (step === 5) {
+              if (step === 5) {
                 text = ok ? 'Clicked Sudah' : msg?.reason ?? 'Sudah not found';
               } else if (step === 6) {
                 text = ok
@@ -896,17 +807,53 @@ export default function SippWebView() {
               } else if (step === 7) {
                 text = ok ? 'Clicked Lanjut' : msg?.reason ?? 'Lanjut not found';
               } else if (step === 8) {
+                // Reset step 5-8 lock when step 8 completes (success or failure)
+                step5InjectionLockRef.current = false;
+                
                 if (ok && msg?.found === true) {
                   const kpj = String(msg?.kpj ?? '');
                   text = `FOUND registered: ${kpj}`;
+                  markChecked(kpj);
                   setFoundCount(c => c + 1);
                   foundKpjRef.current = kpj || null;
-                  // Next page will load after clicking "Lanjutkan" → extract & save
-                  pendingStepRef.current = 9;
-                  setPendingStep(9);
-                  lastStep9UrlRef.current = null;
-                  pushLog('Pending step 9 (extract + save to Firestore)');
+                  // ✅ Index must advance here (only step 8 may advance index).
+                  // Next KPJ will run after we come back from form (step 11).
+                  const nextIndex = kpjIndexRef.current + 1;
+                  kpjIndexRef.current = nextIndex;
+                  setKpjIndex(nextIndex);
+                  // After FOUND, extract profile first (NIK, etc), then go back to form.
+                  // Guard: only set pendingStep if not already set to prevent race condition
+                  if (pendingStepRef.current !== 9) {
+                    pendingStepRef.current = 9;
+                    setPendingStep(9);
+                    lastStep9UrlRef.current = null;
+                    // Ensure step 9 lock is released to allow injection
+                    if (step9InjectionLockRef.current) {
+                      pushLog('⚠️ Step 9 lock was still active, releasing it');
+                      step9InjectionLockRef.current = false;
+                    }
+                    pushLog('FOUND → step 9 (extract profile) then back to form');
+                    // Immediately try to inject step 9 (profile fields might be loaded via AJAX on same page)
+                    setTimeout(() => {
+                      try {
+                        if (pendingStepRef.current === 9 && !step9InjectionLockRef.current) {
+                          pushLog('Fallback: Directly injecting step 9 (profile might be on same page)');
+                          injectStep9ExtractProfile();
+                        } else if (step9InjectionLockRef.current) {
+                          pushLog('Fallback: Step 9 injection locked, will wait for unlock');
+                        } else {
+                          pushLog(`Fallback: Step 9 not pending anymore (pendingStep=${pendingStepRef.current})`);
+                        }
+                      } catch (err: any) {
+                        pushLog(`Fallback error: ${err?.message ?? String(err)}`);
+                      }
+                    }, 1500); // Wait 1.5s for profile fields to load
+                  } else {
+                    pushLog('⚠️ Step 9 already pending, skipping duplicate setup');
+                  }
                 } else if (ok && msg?.found === false) {
+                  // This KPJ is fully "checked" (not registered or cannot be used).
+                  markChecked(msg?.kpj);
                   const nextIndex = kpjIndexRef.current + 1;
                   setNotFoundCount(c => c + 1);
                   if (nextIndex >= kpjList.length) {
@@ -915,170 +862,138 @@ export default function SippWebView() {
                     setPendingStep(0);
                     lastStep5UrlRef.current = null;
                   } else {
-                    text = `Not registered: ${msg?.kpj ?? ''} → next`;
+                    text = msg?.cannotUse 
+                      ? `Cannot use: ${msg?.kpj ?? ''} → next`
+                      : `Not registered: ${msg?.kpj ?? ''} → next`;
                     kpjIndexRef.current = nextIndex;
                     setKpjIndex(nextIndex);
+                    // Navigate back to form and continue with next KPJ
                     pendingStepRef.current = 5;
                     setPendingStep(5);
                     lastStep5UrlRef.current = null;
-                    injectSteps5to8ForKpj(kpjList[nextIndex]);
+                    resetStepUrls();
+                    setWebSourceUrl(withCacheBuster(`${SIPP_FORM_URL}#`));
+                    pushLog(`Step 8: Returning to form for next KPJ (index ${nextIndex})`);
                   }
                 } else {
                   text = msg?.reason ?? 'Step 8 failed';
                 }
               } else if (step === 9) {
+                // Release lock immediately when step 9 message is received (extraction completed)
+                step9InjectionLockRef.current = false;
+                pushLog('🔓 Step 9 lock released (message received)');
+                
+                pushLog(`Step 9 received: ok=${ok}, kpj=${msg?.kpj ?? 'N/A'}, nik=${msg?.nik ?? 'N/A'}, userId=${userId ?? 'NULL'}`);
                 if (ok) {
                   text = `Step 9 extracted: ${msg?.kpj ?? ''}`;
+                  pushLog(`Step 9 data: ${JSON.stringify({kpj: msg?.kpj, nik: msg?.nik, birthdate: msg?.birthdate, name: msg?.name})}`);
+                  
                   // Save to Firestore
+                  pushLog('🔄 Starting Firestore save process...');
                   (async () => {
                     try {
+                      pushLog(`DEBUG: userId=${userId}, hasUserId=${!!userId}`);
                       if (!userId) {
-                        throw new Error('No userId in session');
+                        const errMsg = 'No userId in session';
+                        pushLog(`❌ ERROR: ${errMsg}`);
+                        throw new Error(errMsg);
                       }
                       // Guard: don't save empty profile rows
-                      const nik = String(msg?.nik ?? '');
+                      const nikRaw = String(msg?.nik ?? '');
+                      const nik = nikRaw.replace(/\D+/g, '');
                       const birthdate = String(msg?.birthdate ?? '');
-                      // Keep NIK for step 10 regardless of Firestore outcome
-                      foundNikRef.current = nik || null;
+                      pushLog(`Step 9 validation: nik="${nik}", birthdate="${birthdate}"`);
                       if (!nik && !birthdate) {
-                        throw new Error('Extracted empty profile (nik/birthdate empty)');
+                        const errMsg = 'Extracted empty profile (nik/birthdate empty)';
+                        pushLog(`ERROR: ${errMsg}`);
+                        throw new Error(errMsg);
                       }
-                      const ref = await addDoc(collection(db, 'foundUser'), {
+                      const dataToSave = {
                         userId,
                         kpj: String(msg?.kpj ?? ''),
                         nik: String(msg?.nik ?? ''),
+                        name: String(msg?.name ?? ''),
                         birthdate: String(msg?.birthdate ?? ''),
                         gender: String(msg?.gender ?? ''),
                         marritalStatus: String(msg?.marritalStatus ?? ''),
                         address: String(msg?.address ?? ''),
+                        postalCode: String(msg?.postalCode ?? ''),
                         phone: String(msg?.phone ?? ''),
                         npwp: String(msg?.npwp ?? ''),
                         email: String(msg?.email ?? ''),
-                        name: String(msg?.name ?? ''),
+                        validasiDPT: false,
                         createdAt: serverTimestamp(),
                         sourceUrl: currentUrl,
-                      });
+                      };
+                      pushLog(`💾 Saving to Firestore: ${JSON.stringify({kpj: dataToSave.kpj, nik: dataToSave.nik, name: dataToSave.name})}`);
+                      pushLog(`💾 Data to save keys: ${Object.keys(dataToSave).join(', ')}`);
+                      const ref = await addDoc(collection(db, 'foundUser'), dataToSave);
                       foundUserDocIdRef.current = ref.id;
-                      pushLog(`Saved to Firestore foundUser: ${String(msg?.kpj ?? '')}`);
-                    } catch (err: any) {
-                      pushLog(`Firestore save error: ${err?.message ?? String(err)}`);
-                    } finally {
-                      // Step 10: navigate to KPU + lookup name by NIK
-                      pendingStepRef.current = 10;
-                      setPendingStep(10);
-                      lastStep10UrlRef.current = null;
-                      const nik = foundNikRef.current;
-                      if (nik) {
-                        injectStep10KpuCheck(nik);
+                      pushLog(`✅✅✅ SAVED to Firestore foundUser: ${String(msg?.kpj ?? '')} (docId: ${ref.id}, validasiDPT: false)`);
+                      
+                      // Show success toast
+                      if (Platform.OS === 'android') {
+                        ToastAndroid.show('Data Berhasil Disimpan', ToastAndroid.SHORT);
                       } else {
-                        // If no NIK, we cannot search DPT — skip back and continue loop.
-                        pushLog('Skip DPT (KPU) because NIK is empty');
-                        pendingStepRef.current = 11;
-                        setPendingStep(11);
-                        lastStep11UrlRef.current = null;
-                        injectStep10NavigateBack();
+                        Alert.alert('Berhasil', 'Data Berhasil Disimpan');
+                      }
+                    } catch (err: any) {
+                      const errMsg = `Firestore save error: ${err?.message ?? String(err)}`;
+                      pushLog(`❌ ${errMsg}`);
+                      console.error('Step 9 Firestore save error:', err);
+                      if (Platform.OS === 'android') {
+                        ToastAndroid.show(errMsg, ToastAndroid.LONG);
+                      } else {
+                        Alert.alert('Save Error', errMsg);
+                      }
+                    } finally {
+                      // After saving profile, navigate back to form and continue with next KPJ
+                      const nextIndex = kpjIndexRef.current;
+                      if (nextIndex >= kpjList.length) {
+                        // All KPJs processed
+                        pendingStepRef.current = 0;
+                        setPendingStep(0);
+                        setArmed(false);
+                        loopInitializedRef.current = false;
+                        pushLog('All KPJs processed - loop finished');
+                      } else {
+                        // Continue with next KPJ - navigate back to form
+                        pendingStepRef.current = 5;
+                        setPendingStep(5);
+                        resetStepUrls();
+                        lastStep5UrlRef.current = null;
+                        setWebSourceUrl(withCacheBuster(`${SIPP_FORM_URL}#`));
+                        pushLog(`Step 9 done → back to form, will continue with next KPJ (index ${nextIndex})`);
+                        // onLoadEnd will handle injecting step 5 when form loads
                       }
                     }
                   })();
                 } else {
                   text = msg?.reason ?? 'Step 9 failed';
-                  pushLog(`Step 9 failed: ${msg?.reason ?? ''}`);
-                  // still attempt to go to step 11 and continue
-                  pendingStepRef.current = 11;
-                  setPendingStep(11);
-                  lastStep11UrlRef.current = null;
-                  injectStep10NavigateBack();
-                }
-              } else if (step === 10) {
-                // Step 10: KPU check result
-                if (ok && msg?.phase === 'result' && msg?.name) {
-                  const kpuName = String(msg.name);
-                  const isNotRegistered =
-                    kpuName.toLowerCase().includes('data anda belum terdaftar');
-
-                  if (isNotRegistered) {
-                    text = 'KPU: Data anda belum terdaftar! (deleting record)';
-                    (async () => {
-                      try {
-                        const docId = foundUserDocIdRef.current;
-                        if (docId) {
-                          await deleteDoc(doc(db, 'foundUser', docId));
-                          pushLog(`Deleted foundUser (KPU not registered): ${docId}`);
-                        } else {
-                          pushLog('No foundUser docId to delete');
-                        }
-                      } catch (err: any) {
-                        pushLog(
-                          `KPU deleteDoc error: ${err?.message ?? String(err)}`,
-                        );
-                      } finally {
-                        pendingStepRef.current = 11;
-                        setPendingStep(11);
-                        lastStep11UrlRef.current = null;
-                        injectStep10NavigateBack();
-                      }
-                    })();
+                  pushLog(`❌ Step 9 failed: ${msg?.reason ?? 'Unknown reason'}`);
+                  // Lock already released at the start of step 9 handler
+                  // On failure, still try to continue with next KPJ
+                  const nextIndex = kpjIndexRef.current;
+                  if (nextIndex >= kpjList.length) {
+                    pendingStepRef.current = 0;
+                    setPendingStep(0);
+                    setArmed(false);
+                    loopInitializedRef.current = false;
+                    pushLog('Step 9 failed - loop finished (end of list)');
                   } else {
-                    text = `KPU name: ${kpuName}`;
-                  (async () => {
-                    try {
-                      const docId = foundUserDocIdRef.current;
-                      if (docId) {
-                        await updateDoc(doc(db, 'foundUser', docId), {
-                          name: kpuName,
-                          nameSource: 'kpu',
-                          kelurahan: String(msg?.kelurahan ?? ''),
-                          kabupaten: String(msg?.kabupaten ?? ''),
-                          updatedAt: serverTimestamp(),
-                        });
-                        pushLog(`Updated foundUser name from KPU: ${kpuName}`);
-                        if (msg?.kelurahan || msg?.kabupaten) {
-                          pushLog(
-                            `Updated wilayah: kelurahan=${String(
-                              msg?.kelurahan ?? '',
-                            )}, kabupaten=${String(msg?.kabupaten ?? '')}`,
-                          );
-                        }
-                      } else {
-                        pushLog('No foundUser docId to update');
-                      }
-                    } catch (err: any) {
-                      pushLog(`KPU updateDoc error: ${err?.message ?? String(err)}`);
-                    } finally {
-                      pendingStepRef.current = 11;
-                      setPendingStep(11);
-                      lastStep11UrlRef.current = null;
-                      injectStep10NavigateBack();
-                    }
-                  })();
+                    pendingStepRef.current = 5;
+                    setPendingStep(5);
+                    resetStepUrls();
+                    lastStep5UrlRef.current = null;
+                    setWebSourceUrl(withCacheBuster(`${SIPP_FORM_URL}#`));
+                    pushLog(`Step 9 failed → back to form, will continue with next KPJ (index ${nextIndex})`);
                   }
-                } else if (!ok && msg?.phase === 'result') {
-                  text = msg?.reason ?? 'KPU result not found';
-                  // still go back to SIPP
-                  pendingStepRef.current = 11;
-                  setPendingStep(11);
-                  lastStep11UrlRef.current = null;
-                  injectStep10NavigateBack();
-                } else {
-                  text = ok ? `KPU: ${msg?.phase ?? 'ok'}` : msg?.reason ?? 'Step 10 failed';
                 }
               } else if (step === 11) {
+                // Step 11 is now handled in step 9's finally block
+                // This handler is kept for backward compatibility but should not be reached
                 text = ok ? 'Back to form' : msg?.reason ?? 'Step 11 failed';
-                // Continue loop from next KPJ until end
-                const nextIndex = kpjIndexRef.current + 1;
-                if (nextIndex >= kpjList.length) {
-                  pendingStepRef.current = 0;
-                  setPendingStep(0);
-                  setArmed(false);
-                  pushLog('Loop finished (end of list)');
-                } else {
-                  kpjIndexRef.current = nextIndex;
-                  setKpjIndex(nextIndex);
-                  pendingStepRef.current = 5;
-                  setPendingStep(5);
-                  lastStep5UrlRef.current = null;
-                  injectSteps5to8ForKpj(kpjList[nextIndex]);
-                }
+                pushLog('Step 11 received (should be handled by step 9)');
               }
 
               if (Platform.OS === 'android') {
@@ -1217,7 +1132,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: normalize(12),
     paddingTop: normalize(10),
     paddingBottom: normalize(8),
-    maxHeight: normalize(160),
+    maxHeight: normalize(300),
   },
   debugTitle: {
     color: '#fff',

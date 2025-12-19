@@ -24,6 +24,7 @@ export default function DataTerkumpul() {
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const [loading, setLoading] = useState(false);
   const [userId, setUserId] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<'belum' | 'sudah'>('belum');
   const [items, setItems] = useState<
     Array<{
       id: string;
@@ -41,6 +42,7 @@ export default function DataTerkumpul() {
       kelurahan?: string;
       kabupaten?: string;
       validasiLasik?: string | null;
+      validasiDPT?: boolean;
     }>
   >([]);
 
@@ -82,6 +84,16 @@ export default function DataTerkumpul() {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  const filteredItems = useMemo(() => {
+    if (activeTab === 'belum') {
+      // Belum Cek DPT: validasiDPT is explicitly false
+      return items.filter(x => x.validasiDPT === false);
+    } else {
+      // Sudah Cek DPT: validasiDPT is explicitly true
+      return items.filter(x => x.validasiDPT === true);
+    }
+  }, [items, activeTab]);
 
   const total = items.length;
   const foundKpjCount = useMemo(
@@ -201,8 +213,43 @@ export default function DataTerkumpul() {
         </Text>
       </View>
 
+      <View style={styles.tabsContainer}>
+        <TouchableOpacity
+          style={[styles.tab, activeTab === 'belum' && styles.tabActive]}
+          onPress={() => setActiveTab('belum')}
+          accessibilityRole="button">
+          <Text
+            style={[styles.tabText, activeTab === 'belum' && styles.tabTextActive]}>
+            Belum Cek DPT
+          </Text>
+          {activeTab === 'belum' && (
+            <View style={styles.tabBadge}>
+              <Text style={styles.tabBadgeText}>
+                {filteredItems.length}
+              </Text>
+            </View>
+          )}
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.tab, activeTab === 'sudah' && styles.tabActive]}
+          onPress={() => setActiveTab('sudah')}
+          accessibilityRole="button">
+          <Text
+            style={[styles.tabText, activeTab === 'sudah' && styles.tabTextActive]}>
+            Sudah Cek DPT
+          </Text>
+          {activeTab === 'sudah' && (
+            <View style={styles.tabBadge}>
+              <Text style={styles.tabBadgeText}>
+                {filteredItems.length}
+              </Text>
+            </View>
+          )}
+        </TouchableOpacity>
+      </View>
+
       <FlatList
-        data={items}
+        data={filteredItems}
         keyExtractor={item => item.id}
         refreshControl={
           <RefreshControl refreshing={loading} onRefresh={refresh} />
@@ -357,10 +404,18 @@ export default function DataTerkumpul() {
 
       <TouchableOpacity
         style={styles.fab}
-        onPress={() => navigation.navigate('LasikWebView')}
+        onPress={() => {
+          if (activeTab === 'belum') {
+            navigation.navigate('DPTWebView');
+          } else {
+            navigation.navigate('LasikWebView');
+          }
+        }}
         accessibilityRole="button"
       >
-        <Text style={styles.fabText}>Cek Lasik</Text>
+        <Text style={styles.fabText}>
+          {activeTab === 'belum' ? 'Cek DPT' : 'Cek Lasik'}
+        </Text>
       </TouchableOpacity>
     </View>
   );
@@ -375,6 +430,50 @@ const styles = StyleSheet.create({
   },
   header: {
     marginBottom: normalize(12),
+  },
+  tabsContainer: {
+    flexDirection: 'row',
+    backgroundColor: '#fff',
+    borderRadius: normalize(12),
+    padding: normalize(4),
+    marginBottom: normalize(16),
+    borderWidth: 1,
+    borderColor: '#eef0f4',
+  },
+  tab: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: normalize(10),
+    paddingHorizontal: normalize(12),
+    borderRadius: normalize(8),
+    gap: normalize(6),
+  },
+  tabActive: {
+    backgroundColor: '#007AFF',
+  },
+  tabText: {
+    fontSize: normalize(14),
+    fontWeight: '700',
+    color: '#666',
+  },
+  tabTextActive: {
+    color: '#fff',
+  },
+  tabBadge: {
+    minWidth: normalize(20),
+    height: normalize(20),
+    borderRadius: normalize(10),
+    backgroundColor: 'rgba(255, 255, 255, 0.3)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: normalize(6),
+  },
+  tabBadgeText: {
+    fontSize: normalize(11),
+    fontWeight: '800',
+    color: '#fff',
   },
   title: {
     fontSize: normalize(22),

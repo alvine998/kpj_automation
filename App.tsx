@@ -12,6 +12,7 @@ import DataTerkumpul from './src/screens/DataTerkumpul/DataTerkumpul';
 import Akun from './src/screens/Akun/Akun';
 import SippWebView from './src/screens/WebView/SippWebView';
 import LasikWebView from './src/screens/WebView/LasikWebView';
+import DPTWebView from './src/screens/WebView/DPTWebView';
 import {loadSession} from './src/utils/session';
 
 export type RootStackParamList = {
@@ -20,6 +21,7 @@ export type RootStackParamList = {
   MainTabs: undefined;
   SippWebView: undefined;
   LasikWebView: undefined;
+  DPTWebView: undefined;
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -122,6 +124,7 @@ export default function App() {
           <Stack.Screen name="MainTabs" component={MainTabs} />
           <Stack.Screen name="SippWebView" component={SippWebView} />
           <Stack.Screen name="LasikWebView" component={LasikWebView} />
+          <Stack.Screen name="DPTWebView" component={DPTWebView} />
         </Stack.Navigator>
       </NavigationContainer>
     </SafeAreaProvider>

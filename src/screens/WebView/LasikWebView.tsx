@@ -4,6 +4,7 @@ import {
   Alert,
   Platform,
   SafeAreaView,
+  ScrollView,
   StyleSheet,
   Text,
   ToastAndroid,
@@ -26,6 +27,7 @@ const LASIK_URL =
 export default function LasikWebView() {
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const [currentUrl, setCurrentUrl] = useState(LASIK_URL);
+  const [webSourceUrl, setWebSourceUrl] = useState(LASIK_URL);
   const webRef = useRef<WebView>(null);
   const [userId, setUserId] = useState<string | null>(null);
   const [role, setRole] = useState<string | null>(null);
@@ -34,6 +36,9 @@ export default function LasikWebView() {
   const [pendingStep, setPendingStep] = useState<0 | 1 | 2 | 3 | 7>(0);
   const lastRunUrlRef = useRef<string | null>(null);
   const loopInitializedRef = useRef(false);
+  const processingIndexRef = useRef<number | null>(null);
+  const [debugOpen, setDebugOpen] = useState(false);
+  const [debugLogs, setDebugLogs] = useState<string[]>([]);
   const [items, setItems] = useState<
     Array<{id: string; nik?: string; kpj?: string; name?: string}>
   >([]);
@@ -50,6 +55,20 @@ export default function LasikWebView() {
 
   const isAdmin =
     role === 'admin' || email === 'admin' || userId === 'admin' || email === 'admin@admin';
+
+  useEffect(() => {
+    // Debug panel only for admin.
+    if (isAdmin) setDebugOpen(true);
+    else setDebugOpen(false);
+  }, [isAdmin]);
+
+  const pushLog = (line: string) => {
+    if (!isAdmin) return;
+    setDebugLogs(prev => {
+      const next = [`${new Date().toLocaleTimeString()}  ${line}`, ...prev];
+      return next.slice(0, 80);
+    });
+  };
 
   useEffect(() => {
     (async () => {
@@ -70,11 +89,20 @@ export default function LasikWebView() {
         );
       } catch (e) {
         // ignore: webview can still run even if this fails
+        pushLog(`load foundUser failed: ${String((e as any)?.message ?? e)}`);
       }
     })();
   }, [userId]);
 
   const normalizeUrl = (url: string) => url.replace(/\/+$/, '');
+  const isRecaptchaUrl = (url: string) =>
+    typeof url === 'string' &&
+    (url.includes('g-recaptcha-response=') || url.toLowerCase().includes('recaptcha'));
+
+  const withCacheBuster = (url: string) => {
+    const sep = url.includes('?') ? '&' : '?';
+    return `${url}${sep}t=${Date.now()}`;
+  };
 
   const toast = (msg: string) => {
     if (Platform.OS === 'android') ToastAndroid.show(msg, ToastAndroid.SHORT);
@@ -176,12 +204,6 @@ export default function LasikWebView() {
             try { el.dispatchEvent(new KeyboardEvent('keydown', opts)); } catch (e) {}
             try { el.dispatchEvent(new KeyboardEvent('keypress', opts)); } catch (e) {}
             try { el.dispatchEvent(new KeyboardEvent('keyup', opts)); } catch (e) {}
-            // Fallback: submit closest form if any
-            try {
-              var form = el.closest && el.closest('form');
-              if (form && typeof form.requestSubmit === 'function') form.requestSubmit();
-              else if (form) form.submit();
-            } catch (e2) {}
             return true;
           } catch (e3) {}
           return false;
@@ -238,18 +260,34 @@ export default function LasikWebView() {
             window.ReactNativeWebView.postMessage(JSON.stringify(Object.assign({type:'lasik', step:7, ok:ok}, extra || {})));
           } catch (e) {}
         }
+        function norm(s) {
+          try { return String(s || '').trim().toLowerCase(); } catch (e) {}
+          return '';
+        }
         try {
           var attempts = 0;
           var maxAttempts = 40; // ~20s
           var interval = setInterval(function(){
             attempts++;
             var btns = Array.prototype.slice.call(document.querySelectorAll('button'));
-            var bersedia = btns.find(function(b){
-              return ((b.textContent || '').trim().toLowerCase() === 'bersedia');
-            }) || null;
-            if (bersedia) {
+            var labels = btns
+              .map(function(b){ return norm(b && b.textContent); })
+              .filter(function(t){ return !!t; });
+
+            // Any blocking/confirm buttons after pressing Enter:
+            // - OK (SweetAlert / modal)
+            // - Bersedia (LASIK result page)
+            // - etc
+            var keywords = ['ok','bersedia','lanjutkan','tutup','close','ya','iya'];
+            var matched = keywords.filter(function(k){
+              return labels.some(function(t){ return t === k || t.indexOf(k) !== -1; });
+            });
+
+            var hasBersedia = labels.some(function(t){ return t === 'bersedia'; });
+
+            if (matched.length) {
               clearInterval(interval);
-              post(true, {hasBersedia:true, attempts:attempts});
+              post(true, {hasBersedia:hasBersedia, attempts:attempts, matched: matched, labels: labels.slice(0, 20)});
             } else if (attempts >= maxAttempts) {
               clearInterval(interval);
               post(true, {hasBersedia:false, attempts:attempts});
@@ -274,6 +312,7 @@ export default function LasikWebView() {
       toast('Loop finished');
       return;
     }
+    processingIndexRef.current = idx;
     const nik = (item.nik || '').trim();
     const kpj = (item.kpj || '').trim();
     const name = (item.name || '').trim();
@@ -308,6 +347,14 @@ export default function LasikWebView() {
         <Text style={styles.title} numberOfLines={1}>
           LASIK
         </Text>
+        {isAdmin ? (
+          <TouchableOpacity
+            style={styles.debugBtn}
+            onPress={() => setDebugOpen(v => !v)}
+            accessibilityRole="button">
+            <Text style={styles.debugBtnText}>{debugOpen ? 'Hide' : 'Debug'}</Text>
+          </TouchableOpacity>
+        ) : null}
       </View>
 
       {isAdmin ? (
@@ -319,15 +366,80 @@ export default function LasikWebView() {
         </Text>
       ) : null}
 
+      {isAdmin && debugOpen ? (
+        <View style={styles.debugPanel}>
+          <Text style={styles.debugTitle}>Debug</Text>
+          <Text style={styles.debugMeta} numberOfLines={1}>
+            idx: {indexRef.current + 1}/{items.length || 0} • step: {pendingStep} •
+            items: {foundUserCount}
+          </Text>
+          <Text style={styles.debugMeta} numberOfLines={1}>
+            src: {webSourceUrl}
+          </Text>
+          <ScrollView style={styles.debugScroll}>
+            {debugLogs.map((l, idx) => (
+              <Text key={String(idx)} style={styles.debugLine}>
+                {l}
+              </Text>
+            ))}
+          </ScrollView>
+        </View>
+      ) : null}
+
       <WebView
         ref={webRef}
-        source={{uri: LASIK_URL}}
+        source={{uri: webSourceUrl}}
         onNavigationStateChange={nav => {
-          if (nav?.url) setCurrentUrl(nav.url);
+          if (nav?.url) {
+            setCurrentUrl(nav.url);
+            pushLog(`nav: ${nav.url}`);
+          }
         }}
         onLoadEnd={e => {
           const url = e?.nativeEvent?.url;
-          if (url) setCurrentUrl(url);
+          if (url) {
+            setCurrentUrl(url);
+            pushLog(`loadEnd: ${url}`);
+          }
+
+          // Recovery: recaptcha response pages will break the flow.
+          // Mark current item as failed (recaptcha) and continue looping from step 1.
+          if (url && isRecaptchaUrl(url)) {
+            pushLog('Detected recaptcha URL; recovering...');
+            const idx = processingIndexRef.current ?? indexRef.current;
+            const item = items[idx];
+            if (item?.id) {
+              (async () => {
+                try {
+                  await updateDoc(doc(db, 'foundUser', item.id), {
+                    validasiLasik: 'false',
+                    lasikCheckedAt: serverTimestamp(),
+                    lasikReason: 'recaptcha',
+                  } as any);
+                  pushLog(`Marked recaptcha failed for id=${item.id}`);
+                } catch (err: any) {
+                  pushLog(`recaptcha update failed: ${err?.message ?? String(err)}`);
+                } finally {
+                  indexRef.current = idx + 1;
+                  processingIndexRef.current = null;
+                  if (indexRef.current >= items.length) {
+                    setPendingStep(0);
+                    toast('Loop finished');
+                    return;
+                  }
+                  lastRunUrlRef.current = null;
+                  setPendingStep(1);
+                  setWebSourceUrl(withCacheBuster(LASIK_URL));
+                }
+              })();
+            } else {
+              // No item context; just reset to LASIK.
+              lastRunUrlRef.current = null;
+              setPendingStep(1);
+              setWebSourceUrl(withCacheBuster(LASIK_URL));
+            }
+            return;
+          }
 
           // Auto-run steps after entering LASIK webview (once per URL).
           if (url) {
@@ -343,12 +455,16 @@ export default function LasikWebView() {
           try {
             const msg = JSON.parse(e.nativeEvent.data);
             if (msg?.type !== 'lasik') return;
+            pushLog(`msg: ${e.nativeEvent.data}`);
             if (msg.step === 1) {
               // proceed to step 2 regardless (banner might not exist)
               setPendingStep(2);
               injectStep2ClickSwalOk();
             } else if (msg.step === 2) {
               setPendingStep(0);
+              if (isAdmin) {
+                pushLog(msg.ok ? 'LASIK ready' : `LASIK: OK not found (${msg?.reason ?? ''})`);
+              }
               toast(msg.ok ? 'LASIK ready' : 'LASIK: OK not found');
               // Start looping after initial dismissals (only once).
               // After step 7 we redirect to LASIK_URL and run step 1+2 again,
@@ -374,15 +490,20 @@ export default function LasikWebView() {
               const hasBersedia = msg?.hasBersedia === true;
               (async () => {
                 try {
+                  pushLog(
+                    `updateDoc validasiLasik=${hasBersedia ? 'true' : 'false'} id=${item.id}`,
+                  );
                   await updateDoc(doc(db, 'foundUser', item.id), {
                     validasiLasik: hasBersedia ? 'true' : 'false',
                     lasikCheckedAt: serverTimestamp(),
                   } as any);
                 } catch (e: any) {
+                  pushLog(`Firestore update failed: ${e?.message ?? String(e)}`);
                   toast(`Firestore update failed: ${e?.message ?? String(e)}`);
                 } finally {
                   // continue to next item; reload page to reset form
                   indexRef.current = idx + 1;
+                  processingIndexRef.current = null;
                   if (indexRef.current >= items.length) {
                     setPendingStep(0);
                     toast('Loop finished');
@@ -390,10 +511,13 @@ export default function LasikWebView() {
                   }
                   // Allow the next cycle to run step 1+2 again on the same URL.
                   lastRunUrlRef.current = null;
-                  webRef.current?.injectJavaScript(`
-                    (function(){ try { window.location.href = ${JSON.stringify(LASIK_URL)}; } catch(e) {} })();
-                    true;
-                  `);
+                  setPendingStep(1);
+                  // Force the WebView source back to the original LASIK URL.
+                  // This avoids "different URL" surprises caused by site redirects.
+                  // IMPORTANT: use a cache-buster so React/WebView actually navigates
+                  // even if LASIK_URL is the same string as before.
+                  setWebSourceUrl(withCacheBuster(LASIK_URL));
+                  pushLog('next item: restart from step 1 (setWebSourceUrl LASIK_URL)');
                 }
               })();
             }
@@ -430,12 +554,33 @@ const styles = StyleSheet.create({
   },
   backText: {color: '#fff', fontWeight: '800'},
   title: {flex: 1, fontWeight: '900', fontSize: normalize(16), color: '#111'},
+  debugBtn: {
+    paddingHorizontal: normalize(10),
+    paddingVertical: normalize(8),
+    borderRadius: normalize(10),
+    backgroundColor: '#f2f3f7',
+    borderWidth: 1,
+    borderColor: '#e6e8ef',
+  },
+  debugBtnText: {color: '#111', fontWeight: '900', fontSize: normalize(12)},
   url: {
     paddingHorizontal: normalize(12),
     paddingBottom: normalize(8),
     fontSize: normalize(10),
     color: '#666',
   },
+  debugPanel: {
+    marginHorizontal: normalize(12),
+    marginBottom: normalize(8),
+    padding: normalize(10),
+    borderRadius: normalize(12),
+    backgroundColor: '#0b0b0b',
+    maxHeight: normalize(150),
+  },
+  debugTitle: {color: '#fff', fontWeight: '900', marginBottom: normalize(6)},
+  debugMeta: {color: '#c9c9c9', fontSize: normalize(10), marginBottom: normalize(4)},
+  debugLine: {color: '#9efca3', fontSize: normalize(10)},
+  debugScroll: {flexGrow: 0},
   loading: {flex: 1, justifyContent: 'center', alignItems: 'center'},
 });
 

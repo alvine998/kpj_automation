@@ -36,6 +36,8 @@ export default function Home() {
   const [countText, setCountText] = useState('10');
   const [results, setResults] = useState<string[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [arahOpen, setArahOpen] = useState(false);
+  const [targetCount, setTargetCount] = useState<number | null>(null);
   const [editOpen, setEditOpen] = useState(false);
   const [editIndex, setEditIndex] = useState<number | null>(null);
   const [editValue, setEditValue] = useState('');
@@ -49,15 +51,96 @@ export default function Home() {
 
   // KPJ rules:
   // - total length: 11 characters
-  // - last 4 characters: digits
+  // - last 7 characters: digits (6-digit number + 1 digit "tambahan")
   const sanitizeKpj = (s: string) => s.replace(/\s+/g, '').slice(0, 11);
-  const isValidKpj = (s: string) => s.length === 11 && /^\d{4}$/.test(s.slice(-4));
+  const isValidKpj = (s: string) => s.length === 11 && /^\d{7}$/.test(s.slice(-7));
 
-  const prefix7 = useMemo(() => sanitizeKpj(kpj11).slice(0, 7), [kpj11]);
+  // For generator logic: prefix = first 4 chars, angka = next 6 digits, tambahan = last digit
+  const prefix4 = useMemo(() => sanitizeKpj(kpj11).slice(0, 4), [kpj11]);
 
   const sanitizeDigits = (s: string) => s.replace(/\D/g, '');
 
-  const random4 = () => String(Math.floor(Math.random() * 10000)).padStart(4, '0');
+  const generateSeries = async (direction: 'up' | 'down') => {
+    if (isGenerating) return;
+
+    const base = sanitizeKpj(kpj11);
+    const qty = targetCount;
+    if (!isValidKpj(base) || !qty || qty <= 0) {
+      setArahOpen(false);
+      setTargetCount(null);
+      return;
+    }
+
+    const prefix = base.slice(0, 4);
+    const angkaStr = base.slice(4, 10); // 6 digits
+    let angka = Number(angkaStr);
+    let tambahan = Number(base.slice(-1)); // 1 digit
+    if (!Number.isFinite(angka)) angka = 0;
+    if (!Number.isFinite(tambahan)) tambahan = 0;
+
+    setIsGenerating(true);
+    setArahOpen(false);
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
+
+    try {
+      const hasil: string[] = [];
+
+      for (let i = 1; i <= qty; i++) {
+        if (direction === 'up') {
+          angka++;
+        } else {
+          angka--;
+          if (angka < 0) break;
+        }
+
+        const last1 = angka % 10;
+        const last3 = angka % 1000;
+        const last4 = angka % 10000;
+
+        if (direction === 'up') {
+          if ([0, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000].includes(last4)) {
+            tambahan = (tambahan + 6) % 10;
+          } else if ([0, 100, 200, 300, 400, 600, 700, 800, 900].includes(last3)) {
+            tambahan = (tambahan + 6) % 10;
+          } else if (last3 === 500) {
+            tambahan = (tambahan + 5) % 10;
+          } else if (last1 === 5) {
+            tambahan = (tambahan + 7) % 10;
+          } else if ([0, 1, 2, 3, 4, 6, 7, 8, 9].includes(last1)) {
+            tambahan = (tambahan + 8) % 10;
+          }
+        } else {
+          if ([999, 1999, 2999, 3999, 4999, 5999, 6999, 7999, 8999, 9999].includes(last4)) {
+            tambahan = (tambahan + 4) % 10;
+          } else if ([99, 199, 299, 399, 599, 699, 799, 899, 999].includes(last3)) {
+            tambahan = (tambahan + 4) % 10;
+          } else if (last3 === 499) {
+            tambahan = (tambahan + 5) % 10;
+          } else if (last1 === 4) {
+            tambahan = (tambahan + 3) % 10;
+          } else if ([0, 1, 2, 3, 5, 6, 7, 8, 9].includes(last1)) {
+            tambahan = (tambahan + 2) % 10;
+          }
+        }
+
+        const gabungan = prefix + String(angka).padStart(6, '0') + String(tambahan);
+        hasil.push(gabungan);
+      }
+
+      // Sort depending on direction (to match your earlier rule)
+      const dirMul = direction === 'up' ? 1 : -1;
+      const sorted = [...hasil].sort((a, b) => {
+        const aNum = Number(a.slice(4)); // last 7 digits
+        const bNum = Number(b.slice(4));
+        if (aNum !== bNum) return (aNum - bNum) * dirMul;
+        return a.localeCompare(b) * dirMul;
+      });
+      setResults(sorted);
+    } finally {
+      setIsGenerating(false);
+      setTargetCount(null);
+    }
+  };
 
   useEffect(() => {
     let mounted = true;
@@ -139,7 +222,7 @@ export default function Home() {
     if (!isValidKpj(baseKpj)) {
       Alert.alert(
         'KPJ tidak valid',
-        'KPJ harus 11 karakter dan 4 karakter terakhir harus angka.',
+        'KPJ harus 11 karakter dan 7 karakter terakhir harus angka (6 digit angka + 1 digit).',
       );
       return;
     }
@@ -154,35 +237,8 @@ export default function Home() {
       return;
     }
 
-    setIsGenerating(true);
-    // Let UI render the spinner before heavy work
-    await new Promise<void>(resolve => setTimeout(resolve, 0));
-
-    try {
-      const prefix = baseKpj.slice(0, 7);
-      const set = new Set<string>();
-      // Generate unique results as much as possible (max unique space = 10,000)
-      const maxUnique = 10000;
-      const target = Math.min(count, maxUnique);
-
-      let guard = 0;
-      while (set.size < target && guard < target * 20) {
-        set.add(prefix + random4());
-        guard++;
-      }
-
-      const list = Array.from(set);
-      setResults(list);
-
-      if (count > maxUnique) {
-        Alert.alert(
-          'Catatan',
-          `Kombinasi unik untuk 4 digit terakhir maksimal 10.000. Berhasil dibuat ${list.length}.`,
-        );
-      }
-    } finally {
-      setIsGenerating(false);
-    }
+    setTargetCount(count);
+    setArahOpen(true);
   };
 
   const cariData = () => {
@@ -272,7 +328,7 @@ export default function Home() {
           maxLength={11}
           editable={!isGenerating}
         />
-        <Text style={styles.helperText}>Awalan (7 pertama): {prefix7 || '-'}</Text>
+        <Text style={styles.helperText}>Awalan (4 pertama): {prefix4 || '-'}</Text>
 
         <Text style={[styles.label, {marginTop: normalize(14)}]}>
           Jumlah yang dibuat
@@ -440,6 +496,49 @@ export default function Home() {
               </Text>
             }
           />
+        </View>
+      </Modal>
+
+      <Modal
+        visible={arahOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          setArahOpen(false);
+          setTargetCount(null);
+        }}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitleText}>Pilih Arah</Text>
+            <Text style={styles.modalSubtitleText}>
+              Buat deret KPJ dengan arah:
+            </Text>
+
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                style={styles.modalCancel}
+                onPress={() => generateSeries('down')}
+                disabled={isGenerating}>
+                <Text style={styles.modalCancelText}>Turun</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.modalSave}
+                onPress={() => generateSeries('up')}
+                disabled={isGenerating}>
+                <Text style={styles.modalSaveText}>Naik</Text>
+              </TouchableOpacity>
+            </View>
+
+            <TouchableOpacity
+              style={[styles.modalCancel, {marginTop: normalize(10)}]}
+              onPress={() => {
+                setArahOpen(false);
+                setTargetCount(null);
+              }}
+              disabled={isGenerating}>
+              <Text style={styles.modalCancelText}>Batal</Text>
+            </TouchableOpacity>
+          </View>
         </View>
       </Modal>
     </KeyboardAvoidingView>
