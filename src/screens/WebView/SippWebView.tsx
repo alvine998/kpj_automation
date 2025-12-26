@@ -67,6 +67,7 @@ export default function SippWebView() {
   // Race condition guards
   const step9InjectionLockRef = useRef<boolean>(false);
   const step5InjectionLockRef = useRef<boolean>(false);
+  const step5StartTimeRef = useRef<number>(0); // Track when step 5 injection started
   const profileCheckLockRef = useRef<boolean>(false);
 
   useEffect(() => {
@@ -140,20 +141,47 @@ export default function SippWebView() {
   
   const checkProfilePageReady = () => {
     // Inject a quick check to see if profile fields are present
+    // Also check for and handle any modal that might block the profile page
     webRef.current?.injectJavaScript(`
       (function() {
-        var hasNik = document.querySelector('#no_identitas, input[name="no_identitas"], #nik, input[name="nik"]');
-        var hasBirthdate = document.querySelector('#tgl_lahir, input[name="tgl_lahir"], #birthdate, input[name="birthdate"]');
-        var hasName = document.querySelector('#nama_lengkap, input[name="nama_lengkap"]');
-        var isReady = (hasNik || hasBirthdate) && hasName;
-        window.ReactNativeWebView.postMessage(JSON.stringify({
-          type: 'profileCheck',
-          ready: isReady,
-          hasNik: !!hasNik,
-          hasBirthdate: !!hasBirthdate,
-          hasName: !!hasName,
-          url: location.href
-        }));
+        function checkFields() {
+          var hasNik = document.querySelector('#no_identitas, input[name="no_identitas"], #nik, input[name="nik"]');
+          var hasBirthdate = document.querySelector('#tgl_lahir, input[name="tgl_lahir"], #birthdate, input[name="birthdate"]');
+          var hasName = document.querySelector('#nama_lengkap, input[name="nama_lengkap"]');
+          var isReady = (hasNik || hasBirthdate) && hasName;
+          window.ReactNativeWebView.postMessage(JSON.stringify({
+            type: 'profileCheck',
+            ready: isReady,
+            hasNik: !!hasNik,
+            hasBirthdate: !!hasBirthdate,
+            hasName: !!hasName,
+            url: location.href
+          }));
+        }
+        
+        // First, check if there's a modal with "Lanjut" button that needs to be clicked
+        var modalLanjut = Array.prototype.slice.call(document.querySelectorAll('button'))
+          .find(function(b){ 
+            var txt = (b.textContent || '').trim().toLowerCase();
+            var isLanjut = txt === 'lanjut';
+            var isInModal = b.closest('.modal') || b.closest('.swal2-popup') || b.closest('[role="dialog"]');
+            return isLanjut && isInModal;
+          }) || null;
+        
+        if (modalLanjut) {
+          console.log('[ProfileCheck] Found Lanjut button in modal, clicking it');
+          try {
+            modalLanjut.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));
+          } catch(e) {
+            try { modalLanjut.click(); } catch(e2) {}
+          }
+          // Wait a bit after clicking, then check profile fields
+          setTimeout(function(){
+            checkFields();
+          }, 1000);
+        } else {
+          checkFields();
+        }
       })();
       true;
     `);
@@ -234,7 +262,8 @@ export default function SippWebView() {
       return;
     }
     step5InjectionLockRef.current = true;
-    
+    step5StartTimeRef.current = Date.now();
+
     // Reset lock after 10 seconds (safety timeout)
     setTimeout(() => {
       step5InjectionLockRef.current = false;
@@ -366,6 +395,19 @@ export default function SippWebView() {
               }
               if (lanjutkan) {
                 clickWithEvent(lanjutkan);
+                // After clicking Lanjutkan, there might be another modal asking about BPJS card
+                // Wait a bit then check for additional "Lanjut" button and click it
+                setTimeout(function(){
+                  var additionalLanjut = Array.prototype.slice.call(document.querySelectorAll('button'))
+                    .find(function(b){ 
+                      var txt = (b.textContent || '').trim().toLowerCase();
+                      return txt === 'lanjut' && (b.classList.contains('btn-primary') || b.classList.contains('btn-success'));
+                    }) || null;
+                  if (additionalLanjut) {
+                    console.log('[Step 8] Found additional Lanjut button after Lanjutkan, clicking it');
+                    clickWithEvent(additionalLanjut);
+                  }
+                }, 500);
                 post(8, true, {kpj: kpj, found:true, text: txt});
               } else {
                 post(8, false, {reason:'Lanjutkan button not found', kpj: kpj});
@@ -400,8 +442,12 @@ export default function SippWebView() {
       pushLog('⚠️ Step 9 injection already in progress, skipping duplicate');
       return;
     }
+    if (pendingStepRef.current !== 9) {
+      pushLog(`⚠️ Step 9 injection called but pendingStep is ${pendingStepRef.current} (not 9), skipping`);
+      return;
+    }
     step9InjectionLockRef.current = true;
-    pushLog('🔒 Step 9 injection lock acquired - starting extraction');
+    pushLog('🔒🔒🔒 Step 9 injection lock acquired - starting extraction NOW');
     
     // Reset lock after 15 seconds (safety timeout) - increased for profile extraction
     // Lock will be released when step 9 message is received, but this is a safety net
@@ -596,9 +642,9 @@ export default function SippWebView() {
           <Text style={styles.topBarSubtitle} numberOfLines={1}>
             {normalizeUrl(currentUrl)}
           </Text>
-          <Text style={styles.topBarSubtitle} numberOfLines={1}>
+          {/* <Text style={styles.topBarSubtitle} numberOfLines={1}>
             Progress: {checkedCount}/{kpjList.length || 0}
-          </Text>
+          </Text> */}
         </View>
 
         <View style={styles.topBarRight}>
@@ -677,37 +723,90 @@ export default function SippWebView() {
             const normalized = normalizeUrl(url);
             if (lastStep5UrlRef.current !== normalized && !step5InjectionLockRef.current) {
               lastStep5UrlRef.current = normalized;
-              const kpj = kpjList[kpjIndexRef.current];
+              const currentIndex = kpjIndexRef.current;
+              const kpj = kpjList[currentIndex];
+              pushLog(`Step 5 check: index=${currentIndex}, total=${kpjList.length}, kpj=${kpj ?? 'N/A'}, pendingStep=${pendingStepRef.current}`);
               if (kpj) {
-                pushLog(`Step 5: Injecting for KPJ ${kpj} (index ${kpjIndexRef.current})`);
+                pushLog(`Step 5: Injecting for KPJ ${kpj} (index ${currentIndex}/${kpjList.length})`);
                 injectSteps5to8ForKpj(kpj);
+              } else if (currentIndex >= kpjList.length) {
+                pushLog(`⚠️ Step 5: Index ${currentIndex} >= list length ${kpjList.length}, stopping loop`);
+                pendingStepRef.current = 0;
+                setPendingStep(0);
+                setArmed(false);
+                loopInitializedRef.current = false;
+              } else {
+                pushLog(`⚠️ Step 5: KPJ not found at index ${currentIndex}, but index < length. Continuing...`);
               }
             } else if (step5InjectionLockRef.current) {
               pushLog('Step 5: Injection locked, skipping');
+              // Check if step 5-8 has been running for too long (>15 seconds) - timeout recovery
+              const elapsed = Date.now() - step5StartTimeRef.current;
+              if (elapsed > 15000) {
+                pushLog(`⚠️ Step 5-8 timeout detected (${elapsed}ms elapsed) - continuing to next KPJ`);
+                step5InjectionLockRef.current = false;
+                const nextIndex = kpjIndexRef.current + 1;
+                if (nextIndex >= kpjList.length) {
+                  pendingStepRef.current = 0;
+                  setPendingStep(0);
+                  setArmed(false);
+                  loopInitializedRef.current = false;
+                  pushLog('Step 5-8 timeout - loop finished (end of list)');
+                } else {
+                  kpjIndexRef.current = nextIndex;
+                  setKpjIndex(nextIndex);
+                  lastStep5UrlRef.current = null;
+                  resetStepUrls();
+                  setWebSourceUrl(withCacheBuster(`${SIPP_FORM_URL}#`));
+                  pushLog(`Step 5-8 timeout → back to form, will continue with next KPJ (index ${nextIndex})`);
+                }
+              }
             }
           }
 
           // If step 9 pending, extract profile on the new page.
-          // Always check if profile fields are ready (regardless of URL)
+          // Only check if we're NOT on the KPJ form page (we need to be on the profile page)
           if (pendingStepRef.current === 9 && url) {
             const normalized = normalizeUrl(url);
-            pushLog(`Step 9 pending: url=${url}, lastStep9Url=${lastStep9UrlRef.current}, lock=${step9InjectionLockRef.current}`);
+            const isOnKpjForm = normalized.includes('/form-tambah/kpj') || normalized.endsWith('/kpj') || normalized.includes('/form-tambah-tk-individu');
+            const isProfile = isOnProfilePage(url);
+            pushLog(`🔍 Step 9 pending: url=${url}, isKpjForm=${isOnKpjForm}, isProfile=${isProfile}, lastStep9Url=${lastStep9UrlRef.current}, lock=${step9InjectionLockRef.current}`);
             
-            if (lastStep9UrlRef.current !== normalized && !step9InjectionLockRef.current) {
+            // Only check profile fields if we're NOT on the KPJ form page (we need to be on profile page after clicking Lanjutkan)
+            if (!isOnKpjForm && !step9InjectionLockRef.current) {
               // Always check if profile fields are ready before injecting
-              // This works even if URL hasn't changed but fields are loaded via AJAX
-              checkProfilePageReady();
+              if (lastStep9UrlRef.current !== normalized) {
+                // URL changed to profile page - check profile fields
+                pushLog(`🔄 Step 9: URL changed to profile page (${lastStep9UrlRef.current} → ${normalized}), checking profile fields readiness`);
+                lastStep9UrlRef.current = normalized;
+                checkProfilePageReady();
+              } else {
+                // Same URL (profile page) - check again (fields might load via AJAX)
+                pushLog(`🔄 Step 9: Same profile URL (${normalized}), re-checking profile fields (might have loaded via AJAX)`);
+                checkProfilePageReady();
+                // Retry check in case fields loaded after initial check
+                setTimeout(() => {
+                  if (pendingStepRef.current === 9 && !step9InjectionLockRef.current) {
+                    pushLog(`🔄 Step 9: Retry checking profile fields after 1s (URL: ${normalized})`);
+                    checkProfilePageReady();
+                  } else {
+                    pushLog(`⏸️ Step 9: Retry skipped - pendingStep=${pendingStepRef.current}, lock=${step9InjectionLockRef.current}`);
+                  }
+                }, 1000);
+              }
               // Will inject step 9 when profileCheck message confirms fields are ready
+            } else if (isOnKpjForm) {
+              pushLog(`⏸️ Step 9: Still on KPJ form page (${normalized}), waiting for navigation to profile page...`);
+              // Don't check yet - we're still on the form page, need to wait for navigation after clicking Lanjutkan
             } else if (step9InjectionLockRef.current) {
-              pushLog('Step 9: Injection locked, will retry after unlock');
-            } else {
-              pushLog('Step 9: Already checked for this URL, will retry if fields not ready');
-              // Retry check in case fields loaded after initial check
+              pushLog('⏸️ Step 9: Injection locked (lock=true), will retry after unlock');
+              // Try to check anyway after a delay if still locked
               setTimeout(() => {
                 if (pendingStepRef.current === 9 && !step9InjectionLockRef.current) {
+                  pushLog('🔄 Step 9: Lock released, checking profile fields now');
                   checkProfilePageReady();
                 }
-              }, 1000);
+              }, 2000);
             }
           }
 
@@ -729,22 +828,33 @@ export default function SippWebView() {
               
               const isReady = msg?.ready === true;
               const url = msg?.url || currentUrl;
-              pushLog(`Profile check: ready=${isReady}, hasNik=${msg?.hasNik}, hasBirthdate=${msg?.hasBirthdate}, hasName=${msg?.hasName}, url=${url}, lock=${step9InjectionLockRef.current}`);
+              const normalized = normalizeUrl(url);
+              const isOnKpjForm = normalized.includes('/form-tambah/kpj') || normalized.endsWith('/kpj') || normalized.includes('/form-tambah-tk-individu');
               
-              if (isReady) {
-                profileCheckLockRef.current = true;
-                const normalized = normalizeUrl(url);
-                if (!step9InjectionLockRef.current) {
+              pushLog(`🔍 Profile check received: ready=${isReady}, hasNik=${msg?.hasNik}, hasBirthdate=${msg?.hasBirthdate}, hasName=${msg?.hasName}, url=${url}, isKpjForm=${isOnKpjForm}, lock=${step9InjectionLockRef.current}, pendingStep=${pendingStepRef.current}`);
+              
+              // IMPORTANT: Only proceed if we're NOT on the KPJ form page (we need to be on profile page)
+              if (isReady && !isOnKpjForm) {
+                pushLog(`✅✅✅ Profile fields ARE READY on profile page! lock=${step9InjectionLockRef.current}, pendingStep=${pendingStepRef.current}`);
+                
+                if (!step9InjectionLockRef.current && pendingStepRef.current === 9) {
+                  profileCheckLockRef.current = true;
                   lastStep9UrlRef.current = normalized;
-                  pushLog('✅ Step 9: Profile fields ready, injecting extract profile NOW');
+                  pushLog(`🚀🚀🚀 Step 9: Profile fields ready on profile page, CALLING injectStep9ExtractProfile() NOW (url: ${url})`);
                   injectStep9ExtractProfile();
                 } else {
-                  pushLog('⚠️ Step 9: Injection already in progress, will retry after unlock');
+                  if (step9InjectionLockRef.current) {
+                    pushLog(`⚠️⚠️ Step 9: Profile fields ready BUT injection lock is TRUE, will retry after unlock`);
+                  } else if (pendingStepRef.current !== 9) {
+                    pushLog(`⚠️⚠️ Step 9: Profile fields ready BUT pendingStep is ${pendingStepRef.current} (not 9), skipping injection`);
+                  }
                   // Retry after lock is released
                   setTimeout(() => {
                     if (pendingStepRef.current === 9 && !step9InjectionLockRef.current) {
-                      pushLog('Step 9: Retrying injection after unlock');
+                      pushLog('🔄 Step 9: Retrying injection after unlock');
                       injectStep9ExtractProfile();
+                    } else {
+                      pushLog(`⏸️ Step 9: Retry skipped - pendingStep=${pendingStepRef.current}, lock=${step9InjectionLockRef.current}`);
                     }
                   }, 2000);
                 }
@@ -752,15 +862,25 @@ export default function SippWebView() {
                 setTimeout(() => {
                   profileCheckLockRef.current = false;
                 }, 1000);
+              } else if (isReady && isOnKpjForm) {
+                pushLog(`⚠️⚠️ Profile check says ready=true BUT we're still on KPJ form page (${url}), IGNORING - waiting for navigation to profile page`);
               } else {
                 pushLog(`⏳ Step 9: Profile fields not ready yet (hasNik=${msg?.hasNik}, hasBirthdate=${msg?.hasBirthdate}, hasName=${msg?.hasName})`);
-                // Retry after delay if still pending
+                // Retry after delay if still pending (more aggressive retries)
+                profileCheckLockRef.current = false; // Release lock immediately so we can retry
                 setTimeout(() => {
                   if (pendingStepRef.current === 9 && !profileCheckLockRef.current) {
-                    pushLog('Step 9: Retrying profile check...');
+                    pushLog('Step 9: Retrying profile check after 2s...');
                     checkProfilePageReady();
                   }
                 }, 2000);
+                // Additional retry after 5 seconds
+                setTimeout(() => {
+                  if (pendingStepRef.current === 9 && !profileCheckLockRef.current && !step9InjectionLockRef.current) {
+                    pushLog('Step 9: Retrying profile check after 5s (second attempt)...');
+                    checkProfilePageReady();
+                  }
+                }, 5000);
               }
               return;
             }
@@ -809,58 +929,71 @@ export default function SippWebView() {
               } else if (step === 8) {
                 // Reset step 5-8 lock when step 8 completes (success or failure)
                 step5InjectionLockRef.current = false;
+                step5StartTimeRef.current = 0; // Reset timeout tracking
                 
                 if (ok && msg?.found === true) {
                   const kpj = String(msg?.kpj ?? '');
+                  const currentIndex = kpjIndexRef.current;
                   text = `FOUND registered: ${kpj}`;
                   markChecked(kpj);
                   setFoundCount(c => c + 1);
                   foundKpjRef.current = kpj || null;
+                  pushLog(`🎯 FOUND KPJ: ${kpj} at index ${currentIndex} → starting step 9 extraction`);
                   // ✅ Index must advance here (only step 8 may advance index).
                   // Next KPJ will run after we come back from form (step 11).
                   const nextIndex = kpjIndexRef.current + 1;
                   kpjIndexRef.current = nextIndex;
                   setKpjIndex(nextIndex);
+                  pushLog(`📊 Progress: foundCount=${foundCount + 1}, checkedCount=${checkedCount + 1}, nextIndex=${nextIndex}`);
                   // After FOUND, extract profile first (NIK, etc), then go back to form.
-                  // Guard: only set pendingStep if not already set to prevent race condition
-                  if (pendingStepRef.current !== 9) {
-                    pendingStepRef.current = 9;
-                    setPendingStep(9);
-                    lastStep9UrlRef.current = null;
-                    // Ensure step 9 lock is released to allow injection
-                    if (step9InjectionLockRef.current) {
-                      pushLog('⚠️ Step 9 lock was still active, releasing it');
-                      step9InjectionLockRef.current = false;
-                    }
-                    pushLog('FOUND → step 9 (extract profile) then back to form');
-                    // Immediately try to inject step 9 (profile fields might be loaded via AJAX on same page)
-                    setTimeout(() => {
-                      try {
-                        if (pendingStepRef.current === 9 && !step9InjectionLockRef.current) {
-                          pushLog('Fallback: Directly injecting step 9 (profile might be on same page)');
-                          injectStep9ExtractProfile();
-                        } else if (step9InjectionLockRef.current) {
-                          pushLog('Fallback: Step 9 injection locked, will wait for unlock');
-                        } else {
-                          pushLog(`Fallback: Step 9 not pending anymore (pendingStep=${pendingStepRef.current})`);
-                        }
-                      } catch (err: any) {
-                        pushLog(`Fallback error: ${err?.message ?? String(err)}`);
-                      }
-                    }, 1500); // Wait 1.5s for profile fields to load
-                  } else {
-                    pushLog('⚠️ Step 9 already pending, skipping duplicate setup');
+                  // Always set pendingStep to 9 (even if already set) to ensure step 9 runs
+                  // Clear previous step 9 state to allow fresh extraction
+                  if (pendingStepRef.current === 9) {
+                    pushLog(`⚠️ Step 9 was already pending for previous KPJ, resetting for new KPJ ${kpj}`);
                   }
+                  pendingStepRef.current = 9;
+                  setPendingStep(9);
+                  lastStep9UrlRef.current = null; // Reset URL tracking for new profile page
+                  // Ensure step 9 lock is released to allow injection
+                  if (step9InjectionLockRef.current) {
+                    pushLog('⚠️ Step 9 lock was still active, releasing it');
+                    step9InjectionLockRef.current = false;
+                  }
+                  // Reset profile check lock too
+                  profileCheckLockRef.current = false;
+                  pushLog(`🔄 FOUND KPJ ${kpj} → step 9 (extract profile) then back to form`);
+                  // Wait a bit for profile page to load, then check if fields are ready
+                  // The onLoadEnd handler will trigger checkProfilePageReady() when page loads
+                  // But also try to check immediately in case we're already on the profile page
+                  pushLog(`⏱️ FOUND KPJ ${kpj}: Will check profile fields after 1.5s (onLoadEnd should also trigger check)`);
+                  setTimeout(() => {
+                    try {
+                      if (pendingStepRef.current === 9 && !step9InjectionLockRef.current) {
+                        pushLog(`🔄 Fallback: Checking profile fields for KPJ ${kpj} (profile might be on same page)`);
+                        checkProfilePageReady();
+                      } else if (step9InjectionLockRef.current) {
+                        pushLog(`⏸️ Fallback: Step 9 injection locked for KPJ ${kpj}, will wait for unlock (lock=${step9InjectionLockRef.current})`);
+                      } else {
+                        pushLog(`⚠️ Fallback: Step 9 not pending anymore for KPJ ${kpj} (pendingStep=${pendingStepRef.current})`);
+                      }
+                    } catch (err: any) {
+                      pushLog(`❌ Fallback error for KPJ ${kpj}: ${err?.message ?? String(err)}`);
+                    }
+                  }, 1500); // Wait 1.5s for profile fields to load
                 } else if (ok && msg?.found === false) {
                   // This KPJ is fully "checked" (not registered or cannot be used).
                   markChecked(msg?.kpj);
                   const nextIndex = kpjIndexRef.current + 1;
                   setNotFoundCount(c => c + 1);
+                  pushLog(`Step 8: Not found/Cannot use - nextIndex=${nextIndex}, listLength=${kpjList.length}`);
                   if (nextIndex >= kpjList.length) {
                     text = `No registered found (checked ${kpjList.length})`;
                     pendingStepRef.current = 0;
                     setPendingStep(0);
+                    setArmed(false);
+                    loopInitializedRef.current = false;
                     lastStep5UrlRef.current = null;
+                    pushLog(`✅ All KPJs checked - loop finished (index ${nextIndex} >= ${kpjList.length})`);
                   } else {
                     text = msg?.cannotUse 
                       ? `Cannot use: ${msg?.kpj ?? ''} → next`
@@ -873,26 +1006,54 @@ export default function SippWebView() {
                     lastStep5UrlRef.current = null;
                     resetStepUrls();
                     setWebSourceUrl(withCacheBuster(`${SIPP_FORM_URL}#`));
-                    pushLog(`Step 8: Returning to form for next KPJ (index ${nextIndex})`);
+                    pushLog(`Step 8: Returning to form for next KPJ at index ${nextIndex} (${nextIndex + 1}/${kpjList.length})`);
                   }
                 } else {
+                  // Step 8 failed - mark as checked and increment index, then continue to next KPJ
                   text = msg?.reason ?? 'Step 8 failed';
+                  pushLog(`⚠️ Step 8 failed: ${text} - continuing to next KPJ`);
+                  // Mark as checked even on failure to track progress
+                  if (msg?.kpj) {
+                    markChecked(msg.kpj);
+                  }
+                  const nextIndex = kpjIndexRef.current + 1;
+                  if (nextIndex >= kpjList.length) {
+                    // All KPJs processed
+                    pendingStepRef.current = 0;
+                    setPendingStep(0);
+                    setArmed(false);
+                    loopInitializedRef.current = false;
+                    lastStep5UrlRef.current = null;
+                    pushLog('Step 8 failed - loop finished (end of list)');
+                  } else {
+                    kpjIndexRef.current = nextIndex;
+                    setKpjIndex(nextIndex);
+                    // Navigate back to form and continue with next KPJ
+                    pendingStepRef.current = 5;
+                    setPendingStep(5);
+                    lastStep5UrlRef.current = null;
+                    resetStepUrls();
+                    setWebSourceUrl(withCacheBuster(`${SIPP_FORM_URL}#`));
+                    pushLog(`Step 8 failed → back to form, will continue with next KPJ (index ${nextIndex})`);
+                  }
                 }
               } else if (step === 9) {
                 // Release lock immediately when step 9 message is received (extraction completed)
                 step9InjectionLockRef.current = false;
                 pushLog('🔓 Step 9 lock released (message received)');
                 
-                pushLog(`Step 9 received: ok=${ok}, kpj=${msg?.kpj ?? 'N/A'}, nik=${msg?.nik ?? 'N/A'}, userId=${userId ?? 'NULL'}`);
-                if (ok) {
-                  text = `Step 9 extracted: ${msg?.kpj ?? ''}`;
-                  pushLog(`Step 9 data: ${JSON.stringify({kpj: msg?.kpj, nik: msg?.nik, birthdate: msg?.birthdate, name: msg?.name})}`);
+                const currentKpj = String(msg?.kpj ?? '');
+                pushLog(`📨 Step 9 message received: ok=${ok}, kpj=${currentKpj}, nik=${msg?.nik ?? 'N/A'}, userId=${userId ?? 'NULL'}, foundCount=${foundCount}, hasNik=${!!msg?.nik}, hasName=${!!msg?.name}`);
+                if (ok && (msg?.nik || msg?.birthdate)) {
+                  text = `Step 9 extracted: ${currentKpj}`;
+                  pushLog(`📋 Step 9 extracted data for KPJ ${currentKpj}: ${JSON.stringify({kpj: msg?.kpj, nik: msg?.nik, birthdate: msg?.birthdate, name: msg?.name})}`);
                   
-                  // Save to Firestore
-                  pushLog('🔄 Starting Firestore save process...');
+                  // Save to Firestore immediately (don't wait)
+                  pushLog(`🔄 Starting Firestore save process for KPJ: ${currentKpj}`);
+                  // Execute save immediately without wrapping in async IIFE to avoid potential issues
                   (async () => {
                     try {
-                      pushLog(`DEBUG: userId=${userId}, hasUserId=${!!userId}`);
+                      pushLog(`DEBUG: userId=${userId}, hasUserId=${!!userId}, kpj=${currentKpj}`);
                       if (!userId) {
                         const errMsg = 'No userId in session';
                         pushLog(`❌ ERROR: ${errMsg}`);
@@ -902,7 +1063,7 @@ export default function SippWebView() {
                       const nikRaw = String(msg?.nik ?? '');
                       const nik = nikRaw.replace(/\D+/g, '');
                       const birthdate = String(msg?.birthdate ?? '');
-                      pushLog(`Step 9 validation: nik="${nik}", birthdate="${birthdate}"`);
+                      pushLog(`Step 9 validation: kpj=${currentKpj}, nik="${nik}", birthdate="${birthdate}"`);
                       if (!nik && !birthdate) {
                         const errMsg = 'Extracted empty profile (nik/birthdate empty)';
                         pushLog(`ERROR: ${errMsg}`);
@@ -910,7 +1071,7 @@ export default function SippWebView() {
                       }
                       const dataToSave = {
                         userId,
-                        kpj: String(msg?.kpj ?? ''),
+                        kpj: currentKpj,
                         nik: String(msg?.nik ?? ''),
                         name: String(msg?.name ?? ''),
                         birthdate: String(msg?.birthdate ?? ''),
@@ -925,17 +1086,16 @@ export default function SippWebView() {
                         createdAt: serverTimestamp(),
                         sourceUrl: currentUrl,
                       };
-                      pushLog(`💾 Saving to Firestore: ${JSON.stringify({kpj: dataToSave.kpj, nik: dataToSave.nik, name: dataToSave.name})}`);
+                      pushLog(`💾 Saving to Firestore (KPJ: ${currentKpj}): ${JSON.stringify({kpj: dataToSave.kpj, nik: dataToSave.nik, name: dataToSave.name})}`);
                       pushLog(`💾 Data to save keys: ${Object.keys(dataToSave).join(', ')}`);
                       const ref = await addDoc(collection(db, 'foundUser'), dataToSave);
-                      foundUserDocIdRef.current = ref.id;
-                      pushLog(`✅✅✅ SAVED to Firestore foundUser: ${String(msg?.kpj ?? '')} (docId: ${ref.id}, validasiDPT: false)`);
+                      pushLog(`✅✅✅ SAVED to Firestore foundUser: KPJ=${currentKpj} (docId: ${ref.id}, validasiDPT: false)`);
                       
                       // Show success toast
                       if (Platform.OS === 'android') {
-                        ToastAndroid.show('Data Berhasil Disimpan', ToastAndroid.SHORT);
+                        ToastAndroid.show(`Data Berhasil Disimpan (KPJ: ${currentKpj})`, ToastAndroid.SHORT);
                       } else {
-                        Alert.alert('Berhasil', 'Data Berhasil Disimpan');
+                        Alert.alert('Berhasil', `Data Berhasil Disimpan (KPJ: ${currentKpj})`);
                       }
                     } catch (err: any) {
                       const errMsg = `Firestore save error: ${err?.message ?? String(err)}`;
@@ -946,16 +1106,20 @@ export default function SippWebView() {
                       } else {
                         Alert.alert('Save Error', errMsg);
                       }
+                      // Even on error, continue to next KPJ (error is logged, don't stop the loop)
+                      pushLog(`⚠️ Step 9 save error, but continuing to next KPJ anyway`);
                     } finally {
                       // After saving profile, navigate back to form and continue with next KPJ
-                      const nextIndex = kpjIndexRef.current;
-                      if (nextIndex >= kpjList.length) {
+                      // NOTE: kpjIndexRef.current was already incremented in step 8 when FOUND
+                      const currentIndex = kpjIndexRef.current;
+                      pushLog(`Step 9 finally: currentIndex=${currentIndex}, listLength=${kpjList.length}, checked=${checkedCount}, found=${foundCount}`);
+                      if (currentIndex >= kpjList.length) {
                         // All KPJs processed
                         pendingStepRef.current = 0;
                         setPendingStep(0);
                         setArmed(false);
                         loopInitializedRef.current = false;
-                        pushLog('All KPJs processed - loop finished');
+                        pushLog(`✅ All KPJs processed - loop finished (index ${currentIndex} >= ${kpjList.length})`);
                       } else {
                         // Continue with next KPJ - navigate back to form
                         pendingStepRef.current = 5;
@@ -963,30 +1127,40 @@ export default function SippWebView() {
                         resetStepUrls();
                         lastStep5UrlRef.current = null;
                         setWebSourceUrl(withCacheBuster(`${SIPP_FORM_URL}#`));
-                        pushLog(`Step 9 done → back to form, will continue with next KPJ (index ${nextIndex})`);
+                        pushLog(`Step 9 done → back to form, will continue with KPJ at index ${currentIndex} (${currentIndex + 1}/${kpjList.length})`);
                         // onLoadEnd will handle injecting step 5 when form loads
                       }
                     }
                   })();
                 } else {
                   text = msg?.reason ?? 'Step 9 failed';
-                  pushLog(`❌ Step 9 failed: ${msg?.reason ?? 'Unknown reason'}`);
+                  const failureReason = msg?.reason ?? 'Unknown reason';
+                  const hasNoData = !msg?.nik && !msg?.birthdate;
+                  pushLog(`❌ Step 9 failed: ${failureReason}, hasNik=${!!msg?.nik}, hasBirthdate=${!!msg?.birthdate}, hasNoData=${hasNoData}`);
+                  
+                  // If step 9 failed but we have some data, try to save anyway (might be partial data)
+                  if (hasNoData && currentKpj) {
+                    pushLog(`⚠️ Step 9 failed with no data for KPJ ${currentKpj}, but will try to continue anyway`);
+                  }
+                  
                   // Lock already released at the start of step 9 handler
                   // On failure, still try to continue with next KPJ
-                  const nextIndex = kpjIndexRef.current;
-                  if (nextIndex >= kpjList.length) {
+                  // NOTE: kpjIndexRef.current was already incremented in step 8 when FOUND
+                  const currentIndex = kpjIndexRef.current;
+                  pushLog(`Step 9 failed: currentIndex=${currentIndex}, listLength=${kpjList.length}`);
+                  if (currentIndex >= kpjList.length) {
                     pendingStepRef.current = 0;
                     setPendingStep(0);
                     setArmed(false);
                     loopInitializedRef.current = false;
-                    pushLog('Step 9 failed - loop finished (end of list)');
+                    pushLog(`Step 9 failed - loop finished (end of list, index ${currentIndex} >= ${kpjList.length})`);
                   } else {
                     pendingStepRef.current = 5;
                     setPendingStep(5);
                     resetStepUrls();
                     lastStep5UrlRef.current = null;
                     setWebSourceUrl(withCacheBuster(`${SIPP_FORM_URL}#`));
-                    pushLog(`Step 9 failed → back to form, will continue with next KPJ (index ${nextIndex})`);
+                    pushLog(`Step 9 failed → back to form, will continue with KPJ at index ${currentIndex} (${currentIndex + 1}/${kpjList.length})`);
                   }
                 }
               } else if (step === 11) {
